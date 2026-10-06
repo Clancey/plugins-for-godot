@@ -139,6 +139,9 @@ void CollisionObjectLoader::update(const ResourceLoaderSet &p_resource_loaders) 
 
 		const bool is_ray_pickable = node_is_pickable(node);
 		if (node_is_ray_pickable.has(p_idx) != is_ray_pickable) {
+			// Toggling pickability keeps the entity (and its id, node mapping, hover components
+			// and any in-flight gesture target) and only switches its input target and collision.
+			// Re-creating the entity here broke gesture targeting and gaze on device.
 			if (is_ray_pickable) {
 				node_is_ray_pickable.insert(p_idx);
 				register_entity(p_idx);
@@ -146,7 +149,10 @@ void CollisionObjectLoader::update(const ResourceLoaderSet &p_resource_loaders) 
 				mark_dirty(p_idx);
 			} else {
 				node_is_ray_pickable.remove(p_idx);
-				unregister_entity(p_idx, node);
+				if (is_registered(p_idx)) {
+					node_entities[p_idx].entity.setIsInputTarget(false);
+					node_entities[p_idx].entity.setCollision(swift::Array<GodotRealityKit::ShapeResource>::init());
+				}
 			}
 		}
 
@@ -209,9 +215,8 @@ void CollisionObjectLoader::update(const ResourceLoaderSet &p_resource_loaders) 
 }
 
 void CollisionObjectLoader::on_transform_changed(uint32_t p_idx, const godot::Transform3D &transform) {
-	if (node_is_ray_pickable.has(p_idx)) {
-		Base::on_transform_changed(p_idx, transform);
-	}
+	// Entities stay registered while temporarily unpickable, so keep their transforms current.
+	Base::on_transform_changed(p_idx, transform);
 }
 
 static auto hover_effect_prop_hasher = get_hover_effect_3d_prop_hasher();

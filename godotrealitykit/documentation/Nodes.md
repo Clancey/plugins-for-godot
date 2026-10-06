@@ -86,6 +86,8 @@ GodotRealityKit provides spatial input events that extend Godot's standard touch
 
 To handle these events, connect to a `CollisionObject3D`'s [`input_event`](https://docs.godotengine.org/en/stable/classes/class_collisionobject3d.html#class-collisionobject3d-signal-input-event) signal (or override the `_input_event` method). The event arrives as the `event` argument; use the spatial properties below instead of the `event_position` parameter.
 
+You can toggle `input_ray_pickable` at runtime. The node keeps its RealityKit entity while it's not pickable; GodotRealityKit only removes its input target and collision shapes, so gestures, gaze and hover effects on other nodes are unaffected.
+
 ### InputEventSpatialTouch
 
 Extends `InputEventScreenTouch` with spatial data from visionOS. Maps to SwiftUI's `SpatialEventCollection.Event`.

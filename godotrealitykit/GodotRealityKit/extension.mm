@@ -37,6 +37,7 @@
 #include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/classes/xr_interface.hpp>
 #include <godot_cpp/classes/xr_server.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #if !TARGET_OS_OSX
 #include "Loaders/Util/cgimage_util.h"
@@ -122,6 +123,10 @@ void GDRKBridgeDelegate::printError(const char *p_msg) {
 
 void GDRKBridgeDelegate::printWarning(const char *p_msg) {
 	WARN_PRINT(p_msg);
+}
+
+void GDRKBridgeDelegate::printMessage(const char *p_msg) {
+	godot::UtilityFunctions::print(godot::String::utf8(p_msg));
 }
 
 bool GDRKBridgeDelegate::ExtensionSettings::should_convert_world_environment() const {

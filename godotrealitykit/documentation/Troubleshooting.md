@@ -15,6 +15,22 @@ export template includes the simulator slice:
 The folder "xros-arm64-simulator" doesn't exist.
 ```
 
+### Diagnose window and scene lifecycle issues
+
+On visionOS, Godot launches in a 2D window that GodotRealityKit replaces with a loading screen and
+destroys once the volume, portal or immersive space is visible. GodotRealityKit also retires any
+other Godot window the system opens or restores later, and restarts Godot's audio and focus when a
+Godot window closes while the volume is frontmost.
+
+GodotRealityKit logs each scene lifecycle event, window adoption, destruction request and audio
+resume. The messages appear in the Godot output and log file with the prefix
+`GodotRealityKit[scenes]:`, and in the unified system log with the subsystem
+`com.apple.GodotRealityKit` and category `Scenes`. To stream them from a device or simulator, run:
+
+```
+log stream --level info --predicate 'subsystem == "com.apple.GodotRealityKit"'
+```
+
 ### Match the Debug and Release export templates
 
 If you only set up the Debug export template but export in Release, Xcode shows the following compilation error:

@@ -177,7 +177,7 @@ public func hasOriginalScene() -> Bool {
 #if os(macOS)
     return false
 #else
-    return MainActor.assumeIsolated{ !Bridge.originalScenes.isEmpty }
+    return MainActor.assumeIsolated{ Bridge.hasGodotWindowsToDestroy() }
 #endif
 }
 
@@ -191,40 +191,11 @@ public func stopBlockingAsyncTask() {
 
 #if !os(macOS)
 public func destroyOriginalScene() {
+	// Destroying a Godot window triggers sceneDidDisconnect on Godot's scene delegate, which calls
+	// on_focus_out() and stops the audio driver; Bridge's scene lifecycle observer restores focus
+	// and audio while a volume/portal/immersive scene is frontmost.
 	MainActor.assumeIsolated {
-		let originalScenes = Bridge.originalScenes
-		guard !originalScenes.isEmpty else {
-			return
-		}
-		Bridge.originalScenes.removeAll()
-
-		for originalScene in originalScenes {
-			// Destroying the scene triggers sceneDidDisconnect on Godot's delegate, which calls
-			// on_focus_out() and stops the audio driver. Bridge's scene lifecycle observer restarts
-			// audio while a volume is up; here we also stop the retired Godot views' rendering.
-			var token: (any NSObjectProtocol)?
-			token = NotificationCenter.default.addObserver(
-				forName: UIScene.didDisconnectNotification,
-				object: originalScene,
-				queue: .main
-			) { _ in
-				if let token { NotificationCenter.default.removeObserver(token) }
-				let sel = Selector(("sceneDidBecomeActive:"))
-				if let appDelegate = UIApplication.shared.delegate,
-				   appDelegate.responds(to: sel),
-				   let activeScene = UIApplication.shared.connectedScenes.first {
-					appDelegate.perform(sel, with: activeScene)
-				}
-				let views = [Bridge.originalViewController?.view].compactMap { $0 } + Bridge.retiredGodotViews
-				for godotView in views where godotView.responds(to: Selector(("stopRendering"))) {
-					godotView.perform(Selector(("stopRendering")))
-				}
-			}
-
-			UIApplication.shared.requestSceneSessionDestruction(originalScene.session, options: nil) { error in
-				print("Error destroying scene session: \(error.localizedDescription)")
-			}
-		}
+		Bridge.destroyGodotWindowScenes()
 	}
 }
 #endif

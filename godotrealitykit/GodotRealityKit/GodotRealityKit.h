@@ -125,6 +125,7 @@ public:
 
 	void printError(const char *p_msg);
 	void printWarning(const char *p_msg);
+	void printMessage(const char *p_msg);
 
 	struct ExtensionSettings {
 		bool handlesGameControllerEvents;

@@ -21,6 +21,7 @@ import ARKit
 import AVFoundation
 import Combine
 import UIKit
+import os
 #endif
 
 public enum ScenePresentationStyle : String, Sendable {
@@ -721,13 +722,20 @@ class LoadingViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
 
+        // Retired Godot windows also show this screen; don't request another volume for them.
+        if let existing = UIApplication.shared.connectedScenes.first(where: { Bridge.isBridgeScene($0) }) {
+            Bridge.logScene("loading screen appeared; bridge scene already connected (\(Bridge.describe(existing))), not activating another")
+            return
+        }
+        Bridge.logScene("loading screen appeared; requesting \(Bridge.presentationStyle.rawValue) scene")
+
         guard let request = UISceneSessionActivationRequest(hostingDelegateClass: BridgeScene.self, id: Bridge.presentationStyle.rawValue) else {
-            print("Unable to create gdrk UISceneSessionActivationRequest!")
+            Bridge.logScene("unable to create UISceneSessionActivationRequest")
             return
         }
 
         UIApplication.shared.activateSceneSession(for: request) { error in
-            print("Error activating gdrk scene session: \(error)")
+            Bridge.logScene("error activating bridge scene session: \(error)")
         }
     }
 }
@@ -914,26 +922,33 @@ class BridgeScene: NSObject, @MainActor UIHostingSceneDelegate {
         willConnectTo session: UISceneSession,
         options connectionOptions: UIScene.ConnectionOptions
     ) {
+        Bridge.bridgeSessionIDs.insert(session.persistentIdentifier)
+        Bridge.logScene("bridge scene willConnect \(Bridge.describe(scene))")
     }
 
     public func sceneWillEnterForeground(_ scene: UIScene) {
+        Bridge.bridgeSessionIDs.insert(scene.session.persistentIdentifier)
         Bridge.sceneVisible = true
+        Bridge.logScene("bridge scene willEnterForeground; volume visible")
     }
 
     public func sceneDidBecomeActive(_ scene: UIScene) {
-        Bridge.resumeGodotAudioAfterActivatingSession()
+        Bridge.bridgeSessionIDs.insert(scene.session.persistentIdentifier)
+        Bridge.resumeGodotFocus(reason: "bridge scene became active")
     }
 
     public func sceneWillResignActive(_ scene: UIScene) {
-        let sel = Selector(("sceneWillResignActive:"))
-        if let appDelegate = UIApplication.shared.delegate,
-           appDelegate.responds(to: sel) {
-            appDelegate.perform(sel, with: scene)
-        }
+        Bridge.logScene("bridge scene willResignActive; forwarding focus out to Godot")
+        Bridge.forwardToGodotSceneDelegate(Selector(("sceneWillResignActive:")), scene: scene)
     }
 
     public func sceneDidEnterBackground(_ scene: UIScene) {
         Bridge.sceneVisible = false
+        Bridge.logScene("bridge scene didEnterBackground; volume hidden")
+    }
+
+    public func sceneDidDisconnect(_ scene: UIScene) {
+        Bridge.logScene("bridge scene didDisconnect \(Bridge.describe(scene))")
     }
 }
 
@@ -1013,6 +1028,13 @@ public class Bridge {
     @MainActor static var bootSplashBgColor: UIColor = .black
     @MainActor static var audioInterruptionObserver: Any? = nil
     @MainActor static var godotSceneLifecycleObservers: [Any] = []
+    // Session IDs of scenes hosting BridgeScene content. Used with `delegate is BridgeScene`
+    // because SwiftUI may wrap the hosting scene delegate.
+    @MainActor static var bridgeSessionIDs: Set<String> = []
+    // Godot scenes we asked the system to destroy, kept alive until they disconnect.
+    @MainActor static var destroyRequests: [String: (scene: UIWindowScene, requestedAt: Date, attempts: Int)] = [:]
+    @MainActor static var pendingFocusResume: DispatchWorkItem? = nil
+    static let sceneLogger = Logger(subsystem: "com.apple.GodotRealityKit", category: "Scenes")
     #endif
 
     public init() {}
@@ -1072,23 +1094,17 @@ public class Bridge {
 
 #else
         assumeMainActor(delegate) { delegate in
-            guard let originalScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
-                print("No open sessions in application!")
-                return
-            }
-
-            // We need this to keep a hard reference to the original scene somewhere so it doesn't get
-            // deallocated when the UIScene is destroyed
-            Self.originalScenes = [originalScene]
             Self.originalViewController = delegate.getDisplayServerViewController()
             Self.bootSplashImage = delegate.getBootSplashImage()
             Self.bootSplashBgColor = delegate.getBootSplashBgColor()
 
+            Self.installSceneLifecycleObservers()
+            Self.logScene("initialize; connected scenes: \(Self.describeConnectedScenes())")
+
             // The scene transition below may interrupt the AVAudioSession.
             // Godot's own interruption handler calls on_focus_in() when the
             // interruption ends, but we also reactivate the session ourselves
-            // as a safety net. The primary audio restart after the original
-            // scene is destroyed happens in destroyOriginalScene().
+            // as a safety net.
             Self.audioInterruptionObserver = NotificationCenter.default.addObserver(
                 forName: AVAudioSession.interruptionNotification,
                 object: AVAudioSession.sharedInstance(),
@@ -1107,32 +1123,24 @@ public class Bridge {
                 }
             }
 
-            // Set the original godot plain window to a simple view showing just the loading screen
-            // Setting the root view controller here secretly unlinks the display link, stopping the game loop
-            originalScene.keyWindow?.rootViewController = LoadingViewController()
-
-            // Godot's scene delegate calls on_focus_out() (stopping audio) when any of its scenes
-            // resigns, backgrounds or disconnects, including the loading-screen scenes we retire
-            // or the user closes. Keep the game running while a volume/portal/immersive scene is up.
-            for name in [UIScene.didEnterBackgroundNotification, UIScene.didDisconnectNotification] {
-                Self.godotSceneLifecycleObservers.append(NotificationCenter.default.addObserver(
-                    forName: name,
-                    object: nil,
-                    queue: .main
-                ) { notification in
-                    guard let scene = notification.object as? UIScene,
-                          !(scene.delegate is BridgeScene) else {
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            if Bridge.hasForegroundBridgeScene() {
-                                Bridge.resumeGodotAudioAfterActivatingSession(requireForegroundBridgeScene: true)
-                            }
-                        }
-                    }
-                })
+            // Prefer the scene that actually hosts Godot's display-server view controller; with
+            // several restored Godot windows `connectedScenes.first` is arbitrary.
+            let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let originalScene = Self.originalViewController?.viewIfLoaded?.window?.windowScene
+                ?? windowScenes.first { Self.isGodotWindowScene($0) }
+                ?? windowScenes.first
+            guard let originalScene else {
+                Self.logScene("initialize: no connected window scene to show the loading screen in")
+                return
             }
+
+            // Show just the loading screen in the original Godot window. Replacing the root view
+            // controller unlinks Godot's display link, stopping its own game loop. The loading
+            // screen requests the volume/portal/immersive scene when it appears.
+            Self.retireGodotScene(originalScene, reason: "launch scene")
+            // Retire any other Godot windows that are already connected (e.g. restored ones).
+            _ = Self.sweepGodotWindowScenes()
+
             NotificationCenter.default.addObserver(
                 forName: Self.relaunchNotification,
                 object: nil,
@@ -1161,57 +1169,308 @@ public class Bridge {
 
     @MainActor
     static func reattachAfterRelaunch() {
-        let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let candidate = windowScenes.first { scene in
-            guard !(scene.delegate is BridgeScene) else { return false }
-            guard let root = scene.keyWindow?.rootViewController else { return false }
-            return !(root is LoadingViewController)
+        logScene("renderer relaunch detected; connected scenes: \(describeConnectedScenes())")
+        if sweepGodotWindowScenes() == 0 {
+            logScene("relaunch: no new Godot window scene found yet; will retry each frame")
         }
+    }
 
-        guard let newScene = candidate else {
-            print("GodotRealityKit: relaunch guard could not find a godot UIWindowScene to reattach")
-            return
-        }
+    // MARK: Scene diagnostics
 
-        // Track the re-adopted scene alongside any original scene still waiting to be destroyed,
-        // rather than replacing it, so destroyOriginalScene() retires every loading-screen window.
-        if let godotView = newScene.keyWindow?.rootViewController?.view {
-            Self.retiredGodotViews.append(godotView)
+    @MainActor
+    static func logScene(_ message: String) {
+        sceneLogger.notice("\(message, privacy: .public)")
+        let line = "GodotRealityKit[scenes]: " + message
+        line.withCString { delegate?.printMessage($0) }
+    }
+
+    @MainActor
+    static func activationStateName(_ state: UIScene.ActivationState) -> String {
+        switch state {
+        case .unattached: return "unattached"
+        case .foregroundActive: return "foregroundActive"
+        case .foregroundInactive: return "foregroundInactive"
+        case .background: return "background"
+        @unknown default: return "unknown"
         }
-        if !Self.originalScenes.contains(newScene) {
-            Self.originalScenes.append(newScene)
+    }
+
+    @MainActor
+    static func viewControllers(in scene: UIScene) -> [UIViewController] {
+        guard let windowScene = scene as? UIWindowScene else { return [] }
+        return windowScene.windows.flatMap { viewControllers(in: $0) }
+    }
+
+    @MainActor
+    static func viewControllers(in window: UIWindow) -> [UIViewController] {
+        var result: [UIViewController] = []
+        var stack = [window.rootViewController].compactMap { $0 }
+        while let vc = stack.popLast() {
+            result.append(vc)
+            stack.append(contentsOf: vc.children)
+            if let presented = vc.presentedViewController { stack.append(presented) }
         }
-        newScene.keyWindow?.rootViewController = LoadingViewController()
+        return result
+    }
+
+    @MainActor
+    static func isGodotViewController(_ vc: UIViewController) -> Bool {
+        if vc is LoadingViewController { return true }
+        if NSStringFromClass(type(of: vc)).hasPrefix("GDT") { return true }
+        return String(describing: type(of: vc)).contains("GodotSwiftUIViewController")
+    }
+
+    @MainActor
+    static func isBridgeScene(_ scene: UIScene) -> Bool {
+        if scene.delegate is BridgeScene { return true }
+        if bridgeSessionIDs.contains(scene.session.persistentIdentifier) { return true }
+        if scene.session.role == .windowApplicationVolumetric || scene.session.role == .immersiveSpaceApplication {
+            return true
+        }
+        return viewControllers(in: scene).contains { $0 is GodotViewController }
+    }
+
+    // A Godot-owned 2D window: Godot's own WindowGroup scene (launch, restored or relaunched),
+    // identified by its GDTViewController or our loading screen.
+    @MainActor
+    static func isGodotWindowScene(_ scene: UIScene) -> Bool {
+        guard scene is UIWindowScene, !isBridgeScene(scene) else { return false }
+        return viewControllers(in: scene).contains { isGodotViewController($0) }
+    }
+
+    @MainActor
+    static func describe(_ scene: UIScene) -> String {
+        let kind = isBridgeScene(scene) ? "bridge" : (isGodotWindowScene(scene) ? "godot" : "other")
+        let delegateName = scene.delegate.map { String(describing: type(of: $0)) } ?? "nil"
+        let root = (scene as? UIWindowScene)?.windows.first?.rootViewController.map { String(describing: type(of: $0)) } ?? "nil"
+        return "\(kind) id=\(scene.session.persistentIdentifier) role=\(scene.session.role.rawValue) " +
+            "state=\(activationStateName(scene.activationState)) delegate=\(delegateName) root=\(root)"
+    }
+
+    @MainActor
+    static func describeConnectedScenes() -> String {
+        let scenes = UIApplication.shared.connectedScenes.map { "[\(describe($0))]" }
+        return scenes.isEmpty ? "none" : scenes.joined(separator: " ")
+    }
+
+    @MainActor
+    static func installSceneLifecycleObservers() {
+        guard godotSceneLifecycleObservers.isEmpty else { return }
+        let events: [(Notification.Name, String)] = [
+            (UIScene.willConnectNotification, "willConnect"),
+            (UIScene.willEnterForegroundNotification, "willEnterForeground"),
+            (UIScene.didActivateNotification, "didActivate"),
+            (UIScene.willDeactivateNotification, "willDeactivate"),
+            (UIScene.didEnterBackgroundNotification, "didEnterBackground"),
+            (UIScene.didDisconnectNotification, "didDisconnect"),
+        ]
+        for (name, label) in events {
+            godotSceneLifecycleObservers.append(NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { notification in
+                guard let scene = notification.object as? UIScene else { return }
+                MainActor.assumeIsolated {
+                    Bridge.handleSceneEvent(label, scene: scene)
+                }
+            })
+        }
+    }
+
+    @MainActor
+    static func handleSceneEvent(_ label: String, scene: UIScene) {
+        logScene("scene \(label) \(describe(scene))")
+        let id = scene.session.persistentIdentifier
+        if label == "didDisconnect" {
+            if destroyRequests.removeValue(forKey: id) != nil {
+                logScene("destroyed Godot window scene id=\(id)")
+            }
+            originalScenes.removeAll { $0.session.persistentIdentifier == id }
+        }
+        guard !isBridgeScene(scene) else { return }
+        switch label {
+        case "willDeactivate", "didEnterBackground", "didDisconnect":
+            // Godot's scene delegate calls on_focus_out() (stopping audio and pausing focus-aware
+            // games) for every scene, including Godot windows we retire or the user closes.
+            // Restore focus if a volume/portal/immersive scene is still frontmost.
+            scheduleFocusResume(reason: "Godot window \(label) id=\(id)")
+        default:
+            break
+        }
+    }
+
+    @MainActor
+    static func scheduleFocusResume(reason: String) {
+        pendingFocusResume?.cancel()
+        let work = DispatchWorkItem {
+            MainActor.assumeIsolated {
+                Bridge.pendingFocusResume = nil
+                guard let bridgeScene = Bridge.foregroundActiveBridgeScene() else {
+                    Bridge.logScene("not resuming after \(reason): no foreground-active bridge scene")
+                    return
+                }
+                Bridge.resumeGodotFocus(reason: reason, scene: bridgeScene)
+            }
+        }
+        pendingFocusResume = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    @MainActor
+    static func foregroundActiveBridgeScene() -> UIScene? {
+        UIApplication.shared.connectedScenes.first { isBridgeScene($0) && $0.activationState == .foregroundActive }
+    }
+
+    // MARK: Godot window retirement
+
+    // Detach a Godot window from the game: show the loading screen and stop its GDTView's own
+    // display link. The bridge scene's GodotViewController keeps driving Godot's main view.
+    @MainActor
+    static func retireGodotScene(_ scene: UIWindowScene, reason: String) {
+        let id = scene.session.persistentIdentifier
+        let alreadyRetired = originalScenes.contains(scene) || destroyRequests[id] != nil
+        if !alreadyRetired {
+            originalScenes.append(scene)
+        }
+        let godotViews = viewControllers(in: scene)
+            .filter { !($0 is LoadingViewController) && NSStringFromClass(type(of: $0)).hasPrefix("GDT") }
+            .compactMap { $0.viewIfLoaded }
+        for view in godotViews where !retiredGodotViews.contains(view) {
+            retiredGodotViews.append(view)
+            if view !== originalViewController?.viewIfLoaded, view.responds(to: Selector(("stopRendering"))) {
+                view.perform(Selector(("stopRendering")))
+            }
+        }
+        var replaced = 0
+        // Only touch windows hosting Godot content; UIKit's internal windows (e.g.
+        // UITextEffectsWindow) don't support replacing their root view controller.
+        for window in scene.windows where !(window.rootViewController is LoadingViewController) &&
+            viewControllers(in: window).contains(where: { isGodotViewController($0) }) {
+            window.rootViewController = LoadingViewController()
+            replaced += 1
+        }
+        if !alreadyRetired || replaced > 0 {
+            logScene("adopted Godot window (\(reason)) as loading screen: \(describe(scene)), replaced \(replaced) root(s), retired \(godotViews.count) GDTView(s)")
+        }
+    }
+
+    // Retire every connected Godot window not already being destroyed. Returns how many were found.
+    @MainActor
+    @discardableResult
+    static func sweepGodotWindowScenes() -> Int {
+        var found = 0
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            guard destroyRequests[scene.session.persistentIdentifier] == nil, isGodotWindowScene(scene) else { continue }
+            found += 1
+            if !originalScenes.contains(scene) || !viewControllers(in: scene).allSatisfy({ !NSStringFromClass(type(of: $0)).hasPrefix("GDT") }) {
+                retireGodotScene(scene, reason: "sweep")
+            }
+        }
+        return found
+    }
+
+    // Called every frame from SceneLoader; also retries destruction that didn't take.
+    @MainActor
+    static func hasGodotWindowsToDestroy() -> Bool {
+        sweepGodotWindowScenes()
+        let now = Date()
+        for (id, request) in destroyRequests where now.timeIntervalSince(request.requestedAt) > 2.0 {
+            guard request.scene.activationState != .unattached,
+                  UIApplication.shared.connectedScenes.contains(request.scene) else {
+                destroyRequests.removeValue(forKey: id)
+                continue
+            }
+            if request.attempts >= 3 {
+                logScene("giving up destroying Godot window id=\(id) after \(request.attempts) attempts: \(describe(request.scene))")
+                destroyRequests[id] = (request.scene, .distantFuture, request.attempts)
+                continue
+            }
+            logScene("Godot window id=\(id) still connected \(String(format: "%.1f", now.timeIntervalSince(request.requestedAt)))s after destroy request; retrying")
+            requestDestruction(of: request.scene, attempts: request.attempts + 1)
+        }
+        return !originalScenes.isEmpty
+    }
+
+    @MainActor
+    static func destroyGodotWindowScenes() {
+        let scenes = originalScenes
+        originalScenes.removeAll()
+        for scene in scenes {
+            requestDestruction(of: scene, attempts: 1)
+        }
+    }
+
+    @MainActor
+    static func requestDestruction(of scene: UIWindowScene, attempts: Int) {
+        let id = scene.session.persistentIdentifier
+        destroyRequests[id] = (scene, Date(), attempts)
+        logScene("requesting destruction (attempt \(attempts)) of \(describe(scene))")
+        UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil) { error in
+            MainActor.assumeIsolated {
+                Bridge.logScene("destroy request for id=\(id) failed: \(error.localizedDescription) (\(error))")
+            }
+        }
     }
 
     @MainActor
     static func hasForegroundBridgeScene() -> Bool {
         UIApplication.shared.connectedScenes.contains { scene in
-            scene.delegate is BridgeScene &&
+            isBridgeScene(scene) &&
                 (scene.activationState == .foregroundActive || scene.activationState == .foregroundInactive)
         }
     }
 
-    static func resumeGodotAudioAfterActivatingSession(requireForegroundBridgeScene: Bool = false) {
-        let sel = Selector(("sceneDidBecomeActive:"))
+    // Godot's scene delegate (GDTAppDelegate) is installed per scene by SwiftUI, and
+    // UIApplication.shared.delegate is SwiftUI's own, so message Godot's static services directly.
+    @MainActor
+    @discardableResult
+    static func forwardToGodotSceneDelegate(_ selector: Selector, scene: UIScene?) -> String {
+        if let cls = NSClassFromString("GDTAppDelegate") as AnyObject?,
+           cls.responds(to: Selector(("services"))),
+           let services = cls.perform(Selector(("services")))?.takeUnretainedValue() as? [AnyObject] {
+            var count = 0
+            for service in services where service.responds(to: selector) {
+                _ = service.perform(selector, with: scene)
+                count += 1
+            }
+            if count > 0 {
+                return "GDTAppDelegate services (\(count))"
+            }
+        }
+        if let appDelegate = UIApplication.shared.delegate, appDelegate.responds(to: selector) {
+            appDelegate.perform(selector, with: scene)
+            return "UIApplication delegate \(type(of: appDelegate))"
+        }
+        return "nothing (no Godot delegate responds)"
+    }
+
+    // Restarts Godot's audio driver and focus (on_focus_in) after a scene transition.
+    @MainActor
+    static func resumeGodotFocus(reason: String, scene: UIScene? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
+            var sessionError: Error? = nil
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
             } catch {
-                print("GodotRealityKit: failed to activate audio session before resuming Godot audio: \(error)")
+                sessionError = error
             }
             DispatchQueue.main.async {
-                guard let appDelegate = UIApplication.shared.delegate,
-                      appDelegate.responds(to: sel) else {
-                    return
+                MainActor.assumeIsolated {
+                    let target = scene ?? Bridge.foregroundActiveBridgeScene()
+                        ?? UIApplication.shared.connectedScenes.first { $0.activationState == .foregroundActive }
+                        ?? UIApplication.shared.connectedScenes.first
+                    let via = Bridge.forwardToGodotSceneDelegate(Selector(("sceneDidBecomeActive:")), scene: target)
+                    // on_focus_in() restarts the display link of GDTAppDelegateService.viewController,
+                    // which may be a retired Godot window's view; keep those stopped.
+                    for view in Bridge.retiredGodotViews where view !== Bridge.originalViewController?.viewIfLoaded {
+                        if view.responds(to: Selector(("stopRendering"))) {
+                            view.perform(Selector(("stopRendering")))
+                        }
+                    }
+                    let sessionNote = sessionError.map { "; audio session activation failed: \($0)" } ?? ""
+                    Bridge.logScene("audio/focus resume (\(reason)) via \(via)\(sessionNote)")
                 }
-                if requireForegroundBridgeScene && !MainActor.assumeIsolated({ Bridge.hasForegroundBridgeScene() }) {
-                    return
-                }
-                let activeScene = UIApplication.shared.connectedScenes.first {
-                    $0.activationState == .foregroundActive
-                } ?? UIApplication.shared.connectedScenes.first
-                appDelegate.perform(sel, with: activeScene)
             }
         }
     }
