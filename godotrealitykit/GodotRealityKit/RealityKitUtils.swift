@@ -177,7 +177,7 @@ public func hasOriginalScene() -> Bool {
 #if os(macOS)
     return false
 #else
-    return MainActor.assumeIsolated{ Bridge.originalScene != nil }
+    return MainActor.assumeIsolated{ !Bridge.originalScenes.isEmpty }
 #endif
 }
 
@@ -192,35 +192,38 @@ public func stopBlockingAsyncTask() {
 #if !os(macOS)
 public func destroyOriginalScene() {
 	MainActor.assumeIsolated {
-		guard let originalScene = Bridge.originalScene else {
+		let originalScenes = Bridge.originalScenes
+		guard !originalScenes.isEmpty else {
 			return
 		}
-		Bridge.originalScene = nil
+		Bridge.originalScenes.removeAll()
 
-		// Destroying the original scene triggers sceneDidDisconnect on Godot's
-		// delegate, which calls on_focus_out() and stops the audio driver.
-		// Observe the disconnect so we can restart audio afterward.
-		var token: (any NSObjectProtocol)?
-		token = NotificationCenter.default.addObserver(
-			forName: UIScene.didDisconnectNotification,
-			object: originalScene,
-			queue: .main
-		) { _ in
-			if let token { NotificationCenter.default.removeObserver(token) }
-			let sel = Selector(("sceneDidBecomeActive:"))
-			if let appDelegate = UIApplication.shared.delegate,
-			   appDelegate.responds(to: sel),
-			   let activeScene = UIApplication.shared.connectedScenes.first {
-				appDelegate.perform(sel, with: activeScene)
+		for originalScene in originalScenes {
+			// Destroying the scene triggers sceneDidDisconnect on Godot's delegate, which calls
+			// on_focus_out() and stops the audio driver. Bridge's scene lifecycle observer restarts
+			// audio while a volume is up; here we also stop the retired Godot views' rendering.
+			var token: (any NSObjectProtocol)?
+			token = NotificationCenter.default.addObserver(
+				forName: UIScene.didDisconnectNotification,
+				object: originalScene,
+				queue: .main
+			) { _ in
+				if let token { NotificationCenter.default.removeObserver(token) }
+				let sel = Selector(("sceneDidBecomeActive:"))
+				if let appDelegate = UIApplication.shared.delegate,
+				   appDelegate.responds(to: sel),
+				   let activeScene = UIApplication.shared.connectedScenes.first {
+					appDelegate.perform(sel, with: activeScene)
+				}
+				let views = [Bridge.originalViewController?.view].compactMap { $0 } + Bridge.retiredGodotViews
+				for godotView in views where godotView.responds(to: Selector(("stopRendering"))) {
+					godotView.perform(Selector(("stopRendering")))
+				}
 			}
-			if let godotView = Bridge.originalViewController?.view,
-			   godotView.responds(to: Selector(("stopRendering"))) {
-				godotView.perform(Selector(("stopRendering")))
-			}
-		}
 
-		UIApplication.shared.requestSceneSessionDestruction(originalScene.session, options: nil) { error in
-			print("Error destroying scene session: \(error.localizedDescription)")
+			UIApplication.shared.requestSceneSessionDestruction(originalScene.session, options: nil) { error in
+				print("Error destroying scene session: \(error.localizedDescription)")
+			}
 		}
 	}
 }

@@ -174,8 +174,8 @@ extension RealityView {
         let selectionRay: GDRKRay? = nil
 #else
         let selectionRay = event.selectionRay.map{ ray in
-            return GDRKRay(origin: root.convert(position: value.convert(ray.origin, from: .local, to: .scene), to: nil),
-                         direction: root.convert(direction: value.convert(ray.direction, from: .local, to: .scene), to: nil))
+            return GDRKRay(origin: root.convert(position: value.convert(ray.origin, from: .local, to: .scene), from: nil),
+                         direction: root.convert(direction: value.convert(ray.direction, from: .local, to: .scene), from: nil))
         }
 #endif
 
@@ -842,12 +842,53 @@ struct GodotViewControllerRepresentable : UIViewControllerRepresentable {
 }
 
 class BridgeScene: NSObject, @MainActor UIHostingSceneDelegate {
+    // The system default volume size (1280pt per side, ~0.94m), used when
+    // reality_kit/volume_default_size is unset.
+    static let systemDefaultVolumeSize = Size3D(width: 1280.0 / 1360.0, height: 1280.0 / 1360.0, depth: 1280.0 / 1360.0)
+
+    @MainActor static var volumeDefaultSize: Size3D {
+        guard let settings = Bridge.delegate?.getExtensionSettings(),
+              settings.volumeDefaultWidth > 0,
+              settings.volumeDefaultHeight > 0,
+              settings.volumeDefaultDepth > 0 else {
+            return systemDefaultVolumeSize
+        }
+        return Size3D(width: Double(settings.volumeDefaultWidth),
+                      height: Double(settings.volumeDefaultHeight),
+                      depth: Double(settings.volumeDefaultDepth))
+    }
+
+    @MainActor static var volumeResizability: WindowResizability {
+        (Bridge.delegate?.getExtensionSettings().volumeResizable ?? true) ? .contentMinSize : .automatic
+    }
+
+    @MainActor static var volumePlacementPosition: WindowPlacement.Position? {
+        switch Bridge.delegate?.getExtensionSettings().volumePlacement {
+        case .utilityPanel: return .utilityPanel
+        default: return nil
+        }
+    }
+
+    @MainActor static var volumeWorldAlignment: WorldAlignmentBehavior {
+        switch Bridge.delegate?.getExtensionSettings().volumeWorldAlignment {
+        case .adaptive: return .adaptive
+        case .gravityAligned: return .gravityAligned
+        default: return .automatic
+        }
+    }
+
     static var rootScene: some SwiftUI.Scene {
         WindowGroup(id: ScenePresentationStyle.sharedVolumetric.rawValue) {
             SharedVolumetricRealityView(root: Bridge.root.value, delegate: Bridge.delegate)
             .overlay{GodotViewControllerRepresentable()}
         }
         .windowStyle(.volumetric)
+        .defaultSize(volumeDefaultSize, in: .meters)
+        .windowResizability(volumeResizability)
+        .defaultWindowPlacement { _, _ in
+            WindowPlacement(volumePlacementPosition)
+        }
+        .volumeWorldAlignment(volumeWorldAlignment)
         .restorationBehavior(.disabled)
         WindowGroup(id: ScenePresentationStyle.sharedPortal.rawValue) {
             PortalRealityView(root: Bridge.root.value, delegate: Bridge.delegate)
@@ -962,11 +1003,16 @@ public class Bridge {
     @MainActor static var immersionStyle = SceneImmersionStyle.full
 
     #if !os(macOS)
-    @MainActor static var originalScene: UIWindowScene? = nil
+    // Godot-owned UIWindowScenes (the launch scene plus any scene re-adopted after a renderer
+    // relaunch) that show the loading screen until the volume is visible, then get destroyed.
+    // Holding them here also keeps them alive until destruction.
+    @MainActor static var originalScenes: [UIWindowScene] = []
     @MainActor static var originalViewController: UIViewController? = nil
+    @MainActor static var retiredGodotViews: [UIView] = []
     @MainActor static var bootSplashImage: UIImage? = nil
     @MainActor static var bootSplashBgColor: UIColor = .black
     @MainActor static var audioInterruptionObserver: Any? = nil
+    @MainActor static var godotSceneLifecycleObservers: [Any] = []
     #endif
 
     public init() {}
@@ -1033,7 +1079,7 @@ public class Bridge {
 
             // We need this to keep a hard reference to the original scene somewhere so it doesn't get
             // deallocated when the UIScene is destroyed
-            Self.originalScene = originalScene
+            Self.originalScenes = [originalScene]
             Self.originalViewController = delegate.getDisplayServerViewController()
             Self.bootSplashImage = delegate.getBootSplashImage()
             Self.bootSplashBgColor = delegate.getBootSplashBgColor()
@@ -1065,6 +1111,28 @@ public class Bridge {
             // Setting the root view controller here secretly unlinks the display link, stopping the game loop
             originalScene.keyWindow?.rootViewController = LoadingViewController()
 
+            // Godot's scene delegate calls on_focus_out() (stopping audio) when any of its scenes
+            // resigns, backgrounds or disconnects, including the loading-screen scenes we retire
+            // or the user closes. Keep the game running while a volume/portal/immersive scene is up.
+            for name in [UIScene.didEnterBackgroundNotification, UIScene.didDisconnectNotification] {
+                Self.godotSceneLifecycleObservers.append(NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { notification in
+                    guard let scene = notification.object as? UIScene,
+                          !(scene.delegate is BridgeScene) else {
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            if Bridge.hasForegroundBridgeScene() {
+                                Bridge.resumeGodotAudioAfterActivatingSession(requireForegroundBridgeScene: true)
+                            }
+                        }
+                    }
+                })
+            }
             NotificationCenter.default.addObserver(
                 forName: Self.relaunchNotification,
                 object: nil,
@@ -1105,11 +1173,26 @@ public class Bridge {
             return
         }
 
-        Self.originalScene = newScene
+        // Track the re-adopted scene alongside any original scene still waiting to be destroyed,
+        // rather than replacing it, so destroyOriginalScene() retires every loading-screen window.
+        if let godotView = newScene.keyWindow?.rootViewController?.view {
+            Self.retiredGodotViews.append(godotView)
+        }
+        if !Self.originalScenes.contains(newScene) {
+            Self.originalScenes.append(newScene)
+        }
         newScene.keyWindow?.rootViewController = LoadingViewController()
     }
 
-    static func resumeGodotAudioAfterActivatingSession() {
+    @MainActor
+    static func hasForegroundBridgeScene() -> Bool {
+        UIApplication.shared.connectedScenes.contains { scene in
+            scene.delegate is BridgeScene &&
+                (scene.activationState == .foregroundActive || scene.activationState == .foregroundInactive)
+        }
+    }
+
+    static func resumeGodotAudioAfterActivatingSession(requireForegroundBridgeScene: Bool = false) {
         let sel = Selector(("sceneDidBecomeActive:"))
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -1120,6 +1203,9 @@ public class Bridge {
             DispatchQueue.main.async {
                 guard let appDelegate = UIApplication.shared.delegate,
                       appDelegate.responds(to: sel) else {
+                    return
+                }
+                if requireForegroundBridgeScene && !MainActor.assumeIsolated({ Bridge.hasForegroundBridgeScene() }) {
                     return
                 }
                 let activeScene = UIApplication.shared.connectedScenes.first {

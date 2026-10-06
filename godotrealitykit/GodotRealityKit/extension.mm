@@ -230,6 +230,69 @@ GDRKBridgeDelegate::ExtensionSettings GDRKBridgeDelegate::getExtensionSettings()
 			}
 			cached.portalWorldScale = value;
 		}
+
+		// Volumetric window default size
+		{
+			godot::Vector3 value;
+			const auto key = "reality_kit/volume_default_size";
+			if (project_settings->has_setting(key)) {
+				godot::Variant setting = project_settings->get_setting(key);
+				if (setting.get_type() == godot::Variant::VECTOR3) {
+					value = setting;
+				} else {
+					printf("Unsupported reality_kit/volume_default_size \"%s\"\n", setting.stringify().utf8().ptr());
+				}
+			}
+			cached.volumeDefaultWidth = value.x;
+			cached.volumeDefaultHeight = value.y;
+			cached.volumeDefaultDepth = value.z;
+		}
+
+		// Volumetric window resizability
+		{
+			bool value = true;
+			const auto key = "reality_kit/volume_resizable";
+			if (project_settings->has_setting(key)) {
+				value = project_settings->get_setting(key).booleanize();
+			}
+			cached.volumeResizable = value;
+		}
+
+		// Volumetric window placement
+		{
+			godot::String value = "Automatic";
+			const auto key = "reality_kit/volume_default_placement";
+			if (project_settings->has_setting(key)) {
+				value = project_settings->get_setting(key).stringify();
+			}
+			if (value == "Automatic") {
+				cached.volumePlacement = VolumePlacement::kVolumePlacementAutomatic;
+			} else if (value == "Utility Panel") {
+				cached.volumePlacement = VolumePlacement::kVolumePlacementUtilityPanel;
+			} else {
+				printf("Unsupported reality_kit/volume_default_placement \"%s\"\n", value.utf8().ptr());
+				cached.volumePlacement = VolumePlacement::kVolumePlacementAutomatic;
+			}
+		}
+
+		// Volumetric window world alignment
+		{
+			godot::String value = "Automatic";
+			const auto key = "reality_kit/volume_world_alignment";
+			if (project_settings->has_setting(key)) {
+				value = project_settings->get_setting(key).stringify();
+			}
+			if (value == "Automatic") {
+				cached.volumeWorldAlignment = VolumeWorldAlignment::kVolumeWorldAlignmentAutomatic;
+			} else if (value == "Adaptive") {
+				cached.volumeWorldAlignment = VolumeWorldAlignment::kVolumeWorldAlignmentAdaptive;
+			} else if (value == "Gravity Aligned") {
+				cached.volumeWorldAlignment = VolumeWorldAlignment::kVolumeWorldAlignmentGravityAligned;
+			} else {
+				printf("Unsupported reality_kit/volume_world_alignment \"%s\"\n", value.utf8().ptr());
+				cached.volumeWorldAlignment = VolumeWorldAlignment::kVolumeWorldAlignmentAutomatic;
+			}
+		}
 	}
 	return cached;
 }

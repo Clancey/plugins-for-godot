@@ -93,6 +93,17 @@ typedef NS_ENUM(NSUInteger, WorldEnvironmentConversion) {
 	kDisable
 };
 
+typedef NS_ENUM(NSUInteger, VolumePlacement) {
+	kVolumePlacementAutomatic,
+	kVolumePlacementUtilityPanel
+};
+
+typedef NS_ENUM(NSUInteger, VolumeWorldAlignment) {
+	kVolumeWorldAlignmentAutomatic,
+	kVolumeWorldAlignmentAdaptive,
+	kVolumeWorldAlignmentGravityAligned
+};
+
 typedef NS_ENUM(NSUInteger, ControllerHand) {
 	kLeftHand,
 	kRightHand
@@ -121,6 +132,13 @@ public:
 		ImmersionStyle immersionStyle;
 		WorldEnvironmentConversion world_environment;
 		float portalWorldScale; // 0 means unset; use the interactive slider instead.
+		// Volumetric window default size in meters. Any component <= 0 means unset; use the system default.
+		float volumeDefaultWidth;
+		float volumeDefaultHeight;
+		float volumeDefaultDepth;
+		bool volumeResizable;
+		VolumePlacement volumePlacement;
+		VolumeWorldAlignment volumeWorldAlignment;
 
 		bool should_convert_world_environment() const;
 	};

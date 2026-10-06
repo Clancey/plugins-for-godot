@@ -91,6 +91,59 @@ func setup_realitykit_portal_world_scale():
 		"type": TYPE_FLOAT
 	})
 
+func setup_realitykit_volume_default_size():
+	var key: String = "reality_kit/volume_default_size"
+	var default: Vector3 = Vector3.ZERO
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, default)
+	ProjectSettings.set_initial_value(key, default)
+
+	ProjectSettings.add_property_info({
+		"name": key,
+		"type": TYPE_VECTOR3,
+		"hint": PROPERTY_HINT_NONE,
+		"hint_string": "suffix:m"
+	})
+
+func setup_realitykit_volume_resizable():
+	var key: String = "reality_kit/volume_resizable"
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, true)
+	ProjectSettings.set_initial_value(key, true)
+
+	ProjectSettings.add_property_info({
+		"name": key,
+		"type": TYPE_BOOL
+	})
+
+func setup_realitykit_volume_default_placement():
+	var key: String = "reality_kit/volume_default_placement"
+	var default: String = "Automatic"
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, default)
+	ProjectSettings.set_initial_value(key, default)
+
+	ProjectSettings.add_property_info({
+		"name": key,
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_ENUM,
+		"hint_string": "Automatic,Utility Panel"
+	})
+
+func setup_realitykit_volume_world_alignment():
+	var key: String = "reality_kit/volume_world_alignment"
+	var default: String = "Automatic"
+	if not ProjectSettings.has_setting(key):
+		ProjectSettings.set_setting(key, default)
+	ProjectSettings.set_initial_value(key, default)
+
+	ProjectSettings.add_property_info({
+		"name": key,
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_ENUM,
+		"hint_string": "Automatic,Adaptive,Gravity Aligned"
+	})
+
 func setup_debug_rendering_on_macos():
 	var key: String = "reality_kit/debug_rendering_on_macos"
 	if not ProjectSettings.has_setting(key):
@@ -111,6 +164,10 @@ func _init():
 	setup_realitykit_immersion_style()
 	setup_realitykit_worldenvironment()
 	setup_realitykit_portal_world_scale()
+	setup_realitykit_volume_default_size()
+	setup_realitykit_volume_resizable()
+	setup_realitykit_volume_default_placement()
+	setup_realitykit_volume_world_alignment()
 	setup_debug_rendering_on_macos()
 
 func _enter_tree():
