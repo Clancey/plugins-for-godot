@@ -32,6 +32,19 @@ uint32_t MultiMeshLoader::find_or_add(godot::RID p_multimesh_rid) {
 	return idx;
 }
 
+void MultiMeshLoader::prepare_frame_changes() {
+	godot::RenderingServer *rs = rendering_server();
+	for_each_valid([&](uint32_t idx) {
+		const godot::RID multimesh_rid = multimeshes[idx].multimesh_rid;
+		if (!multimesh_rid.is_valid()) {
+			return;
+		}
+		if (multimesh_transform_array_states[idx].capacity < (uint32_t)rs->multimesh_get_instance_count(multimesh_rid)) {
+			mark_dirty(idx);
+		}
+	});
+}
+
 bool MultiMeshLoader::update() {
 	PROFILE_FUNC_SCOPE;
 

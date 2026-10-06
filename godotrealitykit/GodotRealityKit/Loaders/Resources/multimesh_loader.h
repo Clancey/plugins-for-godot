@@ -36,6 +36,10 @@ public:
 		free_idx(p_idx);
 	}
 
+	// Marks multimeshes whose instance buffer must grow as dirty before node dirty flags are
+	// computed, so dependent nodes rebind to the new buffer that update() allocates.
+	void prepare_frame_changes();
+
 	bool update();
 
 	GodotRealityKit::LowLevelInstanceData find_resource(godot::RID p_multimesh_rid) const {

@@ -152,6 +152,7 @@ void SceneLoader::update() {
 
 	if (!loading_in_progress) {
 		meshes->prepare_frame_changes();
+		multimeshes->prepare_frame_changes();
 		nodes->update_transforms();
 		nodes->update_dirty_flags(resource_loaders);
 		nodes->update_visibility_states(resource_loaders);

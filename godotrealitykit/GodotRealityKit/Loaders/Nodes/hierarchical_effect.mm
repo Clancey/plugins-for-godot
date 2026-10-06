@@ -104,7 +104,9 @@ void HierarchicalEffect<Effect>::free(uint64_t p_root_id) {
 	root_id_to_rid.erase(p_root_id);
 	effect_owner.free(rid);
 
-	queued_propagations.push_back({ .root_id = p_root_id, .rid = rid });
+	// Queue an invalid RID so flush_propagations() falls back to the parent's effect instead of
+	// propagating the freed RID.
+	queued_propagations.push_back({ .root_id = p_root_id, .rid = godot::RID() });
 }
 
 template <typename Effect>

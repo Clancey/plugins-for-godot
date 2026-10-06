@@ -56,6 +56,10 @@ void NodeLoader<Derived, Node>::register_entity(uint32_t p_index) {
 
 	Base::owner->for_each_effect([&]<typename Effect>(HierarchicalEffect<Effect> &effect) {
 		const godot::RID effect_rid = Base::node_effect_rids_set.template get<Effect>()[p_index];
+		if (effect_rid.is_valid() && !effect.owns(effect_rid)) {
+			// The effect was freed this frame; flush_propagations() will assign the new RID.
+			return;
+		}
 		static_cast<Derived *>(this)->template _update_effect<Effect>(p_index, effect_rid);
 	});
 }
