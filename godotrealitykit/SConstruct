@@ -134,6 +134,10 @@ def build_godot(target_env):
         'scons verbose=1 platform=macos target=editor generate_bundle=yes dev_build=yes vulkan=false disable_path_overrides=no',
         'scons verbose=1 platform=macos target=template_{config} generate_bundle=yes vulkan=false disable_path_overrides=no'.format(
             config=deps_config),
+        # Build the simulator library first so generate_bundle packages it into the
+        # xros-arm64-simulator slice of godot_visionos.zip.
+        'scons verbose=1 platform=visionos target=template_{config} simulator=yes vulkan=false SWIFT_FRONTEND="{REPO_DIR}/scripts/build/swift-frontend-wrapper.sh"'.format(
+            config=deps_config, REPO_DIR=REPO_DIR),
         'scons verbose=1 platform=visionos target=template_{config} generate_bundle=yes compiledb=yes vulkan=false SWIFT_FRONTEND="{REPO_DIR}/scripts/build/swift-frontend-wrapper.sh"'.format(
             config=deps_config, REPO_DIR=REPO_DIR),
     ]
@@ -164,6 +168,8 @@ def build_godot_cpp(target_env):
             config=deps_config, api=ext_api),
         'scons platform=visionos target=template_{config} custom_api_file={api} custom_tools={tools} use_hot_reload=no'.format(
             config=deps_config, api=ext_api, tools=tools_dir),
+        'scons platform=visionos target=template_{config} visionos_simulator=yes custom_api_file={api} custom_tools={tools} use_hot_reload=no'.format(
+            config=deps_config, api=ext_api, tools=tools_dir),
     ]
 
     for cmd in scons_cmds:
@@ -174,12 +180,13 @@ def build_godot_cpp(target_env):
     if os.path.exists(editor_lib):
         subprocess.check_call(['codesign', '-s', '-', '-f', '-v', editor_lib])
 
-    # Create template symlink
+    # Create template symlinks for device and simulator
     bindir = os.path.join(cppdir, 'bin')
-    template_link = os.path.join(bindir, 'libgodot-cpp.visionos.template.arm64.a')
-    template_src = 'libgodot-cpp.visionos.template_{}.arm64.a'.format(deps_config)
-    if not os.path.exists(template_link):
-        os.symlink(template_src, template_link)
+    for suffix in ['', '.simulator']:
+        template_link = os.path.join(bindir, 'libgodot-cpp.visionos.template.arm64{}.a'.format(suffix))
+        template_src = 'libgodot-cpp.visionos.template_{}.arm64{}.a'.format(deps_config, suffix)
+        if not os.path.lexists(template_link):
+            os.symlink(template_src, template_link)
 
 def deps_action(target, source, env):
     if EXTERNAL_SHARED_WORKSPACE:
@@ -202,22 +209,23 @@ env.AlwaysBuild(deps_builder)
 # framework: xcodebuild the GodotRealityKit framework
 # ---------------------------------------------------------------------------
 
-def resolve_xcode_destination():
+def resolve_xcode_builds():
+    """Return (destination, products subdir) pairs to build for platform_arg."""
+    xcode_config = config_arg.capitalize()
     if platform_arg == 'macos':
-        return 'generic/platform=macOS'
+        return [('generic/platform=macOS', xcode_config)]
     elif platform_arg == 'visionos':
-        return 'generic/platform=visionOS'
+        return [
+            ('generic/platform=visionOS', '{}-xros'.format(xcode_config)),
+            ('generic/platform=visionOS Simulator', '{}-xrsimulator'.format(xcode_config)),
+        ]
     else:
         print("ERROR: Unsupported platform '{}'".format(platform_arg))
         Exit(1)
 
-def resolve_xcode_products_subdir():
-    xcode_config = config_arg.capitalize()
-    if platform_arg == 'macos':
-        return xcode_config
-    elif platform_arg == 'visionos':
-        return '{}-xros'.format(xcode_config)
-    return xcode_config
+def framework_bundle_name():
+    # visionOS ships device + simulator slices as an XCFramework.
+    return 'GodotRealityKit.xcframework' if platform_arg == 'visionos' else 'GodotRealityKit.framework'
 
 def build_framework_action(target, source, env):
     # Create deps symlink that the Xcode project expects at $(SRCROOT)/../deps/
@@ -230,30 +238,39 @@ def build_framework_action(target, source, env):
     os.symlink(deps_target, deps_link)
 
     xcode_config = config_arg.capitalize()
-    destination = resolve_xcode_destination()
     build_dir = os.path.join(SHARED_WORKSPACE, 'xcodebuild', '{}-{}'.format(
         'macOS' if platform_arg == 'macos' else 'visionOS', xcode_config), 'build')
     os.makedirs(build_dir, exist_ok=True)
 
-    subprocess.check_call([
-        XCODEBUILD, 'build',
-        '-derivedDataPath', build_dir,
-        '-project', os.path.join(REPO_DIR, 'GodotRealityKit', 'GodotRealityKit.xcodeproj'),
-        '-scheme', 'GodotRealityKit',
-        '-configuration', xcode_config,
-        '-destination', destination,
-    ])
-
-    products_subdir = resolve_xcode_products_subdir()
-    built_framework = os.path.join(
-        build_dir, 'Build', 'Products', products_subdir, 'GodotRealityKit.framework')
+    built_frameworks = []
+    for destination, products_subdir in resolve_xcode_builds():
+        subprocess.check_call([
+            XCODEBUILD, 'build',
+            '-derivedDataPath', build_dir,
+            '-project', os.path.join(REPO_DIR, 'GodotRealityKit', 'GodotRealityKit.xcodeproj'),
+            '-scheme', 'GodotRealityKit',
+            '-configuration', xcode_config,
+            '-destination', destination,
+        ])
+        built_frameworks.append(os.path.join(
+            build_dir, 'Build', 'Products', products_subdir, 'GodotRealityKit.framework'))
 
     out_dir = framework_build_dir()
     os.makedirs(out_dir, exist_ok=True)
-    dest_framework = os.path.join(out_dir, 'GodotRealityKit.framework')
-    if os.path.exists(dest_framework):
-        shutil.rmtree(dest_framework)
-    shutil.copytree(built_framework, dest_framework)
+    for name in ['GodotRealityKit.framework', 'GodotRealityKit.xcframework']:
+        stale = os.path.join(out_dir, name)
+        if os.path.exists(stale):
+            shutil.rmtree(stale)
+    dest_framework = os.path.join(out_dir, framework_bundle_name())
+
+    if dest_framework.endswith('.xcframework'):
+        cmd = [XCODEBUILD, '-create-xcframework']
+        for fw in built_frameworks:
+            cmd += ['-framework', fw]
+        cmd += ['-output', dest_framework]
+        subprocess.check_call(cmd)
+    else:
+        shutil.copytree(built_frameworks[0], dest_framework)
 
     return 0
 
@@ -344,9 +361,9 @@ def assemble_full_addon(cfg):
     visionos_template_name = 'visionos.template_{}'.format(cfg)
     template_dir = os.path.join(ad, visionos_template_name)
     os.makedirs(template_dir, exist_ok=True)
-    visionos_fw = os.path.join(visionos_bdir, 'GodotRealityKit.framework')
+    visionos_fw = os.path.join(visionos_bdir, 'GodotRealityKit.xcframework')
     if os.path.isdir(visionos_fw):
-        shutil.copytree(visionos_fw, os.path.join(template_dir, 'GodotRealityKit.framework'))
+        shutil.copytree(visionos_fw, os.path.join(template_dir, 'GodotRealityKit.xcframework'))
     visionos_export_zip = os.path.join(gd, 'bin', 'godot_visionos.zip')
     if os.path.exists(visionos_export_zip):
         shutil.copy2(visionos_export_zip, template_dir)

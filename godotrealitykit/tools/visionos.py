@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 import common_compiler_flags
+from SCons.Variables import BoolVariable
 
 
 def has_visionos_osxcross():
@@ -22,6 +23,7 @@ def has_visionos_osxcross():
 
 
 def options(opts):
+    opts.Add(BoolVariable("visionos_simulator", "Target visionOS Simulator", False))
     opts.Add("visionos_min_version", "Target minimum visionos version", "2.0")
     opts.Add("VISIONOS_TOOLCHAIN_PATH", "Path to visionOS toolchain", "")
     opts.Add("VISIONOS_SDK_PATH", "Path to the visionOS SDK", "")
@@ -38,9 +40,17 @@ def generate(env):
     if env["arch"] not in ("universal", "arm64", "x86_64"):
         raise ValueError("Only universal, arm64, and x86_64 are supported on visionOS. Exiting.")
 
-    sdk_name = "xros"
-    env.Append(ASFLAGS=["-mtargetos=xros2.0"])
-    env.Append(CCFLAGS=["-mtargetos=xros2.0"])
+    if env["visionos_simulator"]:
+        sdk_name = "xrsimulator"
+        env.Append(ASFLAGS=["-mtargetos=xros2.0-simulator"])
+        env.Append(CCFLAGS=["-mtargetos=xros2.0-simulator"])
+        # godot-cpp only appends the ".simulator" library/object suffix for
+        # ios_simulator, so reuse it to keep simulator and device builds apart.
+        env["ios_simulator"] = True
+    else:
+        sdk_name = "xros"
+        env.Append(ASFLAGS=["-mtargetos=xros2.0"])
+        env.Append(CCFLAGS=["-mtargetos=xros2.0"])
 
     if sys.platform == "darwin":
         if env["VISIONOS_SDK_PATH"] == "":

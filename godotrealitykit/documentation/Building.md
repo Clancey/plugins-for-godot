@@ -41,7 +41,7 @@ scons config=release
 |---|---|
 | `scons deps` | Clone and build Godot + godot-cpp only |
 | `scons framework platform=macos` | Build macOS framework only |
-| `scons framework platform=visionos` | Build visionOS framework only |
+| `scons framework platform=visionos` | Build visionOS framework only (device + simulator, packaged as an XCFramework) |
 | `scons addon` | Assemble addon for distribution |
 | `scons docs` | Regenerate `doc_data.gen.cpp` from `doc_classes/*.xml` and rebuild the frameworks to embed the updated docs |
 
@@ -60,6 +60,6 @@ addons/GodotRealityKit/
         godot_macos.zip
     macos.template_debug -> macos.editor
     visionos.template_debug/     # or visionos.template_release with config=release
-        GodotRealityKit.framework
+        GodotRealityKit.xcframework  # xros-arm64 + xros-arm64-simulator
         godot_visionos.zip
 ```

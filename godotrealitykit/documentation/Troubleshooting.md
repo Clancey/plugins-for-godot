@@ -1,11 +1,15 @@
 ## Troubleshooting
 
-### Build for a physical Apple Vision Pro instead of the simulator
+### Running in the visionOS simulator
 
-GodotRealityKit does not currently work on the visionOS simulator. It requires
-a physical Apple Vision Pro device.
+GodotRealityKit supports the visionOS simulator. The visionOS export template and
+`GodotRealityKit.xcframework` include both `xros-arm64` and `xros-arm64-simulator` slices,
+so select a visionOS simulator destination in the exported Xcode project.
 
-Xcode shows the following compilation error if you try to build for the visionOS simulator:
+Hand and controller tracking aren't available in the simulator.
+
+If Xcode shows the following error, rebuild the dependencies with `scons deps` so the
+export template includes the simulator slice:
 
 ```
 The folder "xros-arm64-simulator" doesn't exist.
