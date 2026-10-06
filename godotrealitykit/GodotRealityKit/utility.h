@@ -662,6 +662,26 @@ static ObjectProperty<O, Flag<F>> make_object_property(bool (O::*p_getter)(F) co
 	};
 }
 
+template <typename T>
+struct IsGodotRef : std::false_type {};
+
+template <typename T>
+struct IsGodotRef<godot::Ref<T>> : std::true_type {};
+
+template <typename R>
+_FORCE_INLINE_ uint32_t hash_object_property_value(const R &p_value) {
+	if constexpr (IsGodotRef<R>::value) {
+		// PtrToArg<Ref<T>>::encode() writes an engine-side Ref into its target, which
+		// is not a valid godot-cpp Ref<T>; destroying it would unreference the wrong object.
+		return godot::Variant(p_value).hash();
+	} else {
+		using PtrToArg = godot::PtrToArg<R>;
+		typename PtrToArg::EncodeT value;
+		PtrToArg::encode(p_value, &value);
+		return godot::Variant(value).hash();
+	}
+}
+
 template <std::derived_from<godot::Object> O, typename... Ts>
 class ObjectPropertyHasher;
 
@@ -674,12 +694,7 @@ public:
 			property(p_property) {}
 
 	uint32_t hash(const O *p_object, uint32_t p_state = HASH_MURMUR3_SEED) const {
-		using PtrToArg = godot::PtrToArg<R>;
-		typename PtrToArg::EncodeT value;
-		R tmp = property.get(p_object);
-		PtrToArg::encode(tmp, &value);
-
-		const uint32_t hash = godot::Variant(value).hash();
+		const uint32_t hash = hash_object_property_value<R>(property.get(p_object));
 		return godot::hash_murmur3_one_32(hash, p_state);
 	}
 
@@ -697,12 +712,7 @@ public:
 			property(p_property) {}
 
 	uint32_t hash(const O *p_object, uint32_t p_state = HASH_MURMUR3_SEED) const {
-		using PtrToArg = godot::PtrToArg<R>;
-		typename PtrToArg::EncodeT value;
-		R tmp = property.get(p_object);
-		PtrToArg::encode(tmp, &value);
-
-		const uint32_t hash = godot::Variant(value).hash();
+		const uint32_t hash = hash_object_property_value<R>(property.get(p_object));
 		const uint32_t hash_acc = godot::hash_murmur3_one_32(hash, p_state);
 		return ObjectPropertyHasher<O, Ts...>::hash(p_object, hash_acc);
 	}

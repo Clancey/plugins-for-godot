@@ -44,6 +44,10 @@ auto get_sprite_material_prop_hasher() {
 					godot::Sprite3D::FLAG_TRANSPARENT));
 }
 
+auto get_sprite_texture_prop_hasher() {
+	return make_object_property_hasher(make_object_property(&godot::Sprite3D::get_texture));
+}
+
 ProgramDescription get_sprite_base_material_description(godot::SpriteBase3D *p_node) {
 	using SB = godot::SpriteBase3D;
 	using BM = godot::BaseMaterial3D;
@@ -97,6 +101,7 @@ void SpriteLoader::update_deps(
 
 	static auto mesh_prop_hasher = get_sprite_mesh_prop_hasher();
 	static auto material_prop_hasher = get_sprite_material_prop_hasher();
+	static auto texture_prop_hasher = get_sprite_texture_prop_hasher();
 
 	ChangedDependencyListSet changed_mesh_deps = ChangedDependencyListSet(get_capacity());
 	ChangedDependencyListSet changed_material_deps = ChangedDependencyListSet(get_capacity());
@@ -121,7 +126,7 @@ void SpriteLoader::update_deps(
 		}
 
 		// In the material case, since we don't specify a material resource object we also need to provide and update the MaterialDescription manually.
-		const uint32_t material_hash = material_prop_hasher.hash(node);
+		const uint32_t material_hash = texture_prop_hasher.hash(node, material_prop_hasher.hash(node));
 		if (dep_states[idx].material_hash != material_hash) {
 			ProgramDescription material_description = get_sprite_base_material_description(node);
 			for (uint32_t material_idx : add_material_deps(changed_material_deps, materials, idx, node)) {
@@ -132,7 +137,9 @@ void SpriteLoader::update_deps(
 
 			// Register the texture with the texture loader ahead of when the material registers it since we also have the resource object here.
 			godot::Ref<godot::Texture2D> texture = node->get_texture();
-			textures->find_or_add(texture->get_rid(), texture.ptr());
+			if (texture.is_valid()) {
+				textures->find_or_add(texture->get_rid(), texture.ptr());
+			}
 
 			dep_states[idx].material_hash = material_hash;
 		}
