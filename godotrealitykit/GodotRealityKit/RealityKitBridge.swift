@@ -499,6 +499,10 @@ struct SharedVolumetricRealityView : View {
                     self.subscription = content.subscribe(to: SceneEvents.Update.self, self.onSceneUpdate)
             }, update: { content in
                    let viewBounds = content.convert(proxy.frame(in: .local), from: .local, to: .scene)
+                   if self.state.lastViewBounds?.extents != viewBounds.extents {
+                       let e = viewBounds.extents
+                       Bridge.logScene(String(format: "volume bounds %.2f x %.2f x %.2f m", e.x, e.y, e.z))
+                   }
                    self.updateCamera(viewBounds: viewBounds)
                    self.delegate?.onWindowResized(simd_float3(proxy.size.vector))
                    self.updateAccessoryAnchors(content: content)
@@ -697,6 +701,15 @@ struct SharedVolumetricRealityView : View {
     }
 }
 
+// Selectors of GDTExtensionVolume's class methods (Godot's platform/visionos/app_visionos.swift).
+// Called on the class object, which doesn't formally conform.
+@objc protocol GDRKExtensionVolumeHost {
+    func setContent(_ content: Any?) -> Bool
+    func setPlacementProvider(_ provider: @escaping ([String]) -> String)
+    func configure(_ options: NSDictionary)
+    func open() -> Bool
+}
+
 class LoadingViewController: UIViewController {
     override func loadView() {
         let loadingView = UIView()
@@ -728,6 +741,13 @@ class LoadingViewController: UIViewController {
             return
         }
         Bridge.logScene("loading screen appeared; requesting \(Bridge.presentationStyle.rawValue) scene")
+
+        if Bridge.presentationStyle == .sharedVolumetric {
+            if Bridge.openAppHostedVolume() {
+                return
+            }
+            Bridge.logScene("opening the volume through UIKit; reality_kit/volume_default_placement has no effect on this path")
+        }
 
         guard let request = UISceneSessionActivationRequest(hostingDelegateClass: BridgeScene.self, id: Bridge.presentationStyle.rawValue) else {
             Bridge.logScene("unable to create UISceneSessionActivationRequest")
@@ -1034,6 +1054,8 @@ public class Bridge {
     // Godot scenes we asked the system to destroy, kept alive until they disconnect.
     @MainActor static var destroyRequests: [String: (scene: UIWindowScene, requestedAt: Date, attempts: Int)] = [:]
     @MainActor static var pendingFocusResume: DispatchWorkItem? = nil
+    // The volume was opened through the Godot App's GDTExtensionVolume window instead of BridgeScene.
+    @MainActor static var appHostedVolume = false
     static let sceneLogger = Logger(subsystem: "com.apple.GodotRealityKit", category: "Scenes")
     #endif
 
@@ -1288,6 +1310,10 @@ public class Bridge {
             }
             originalScenes.removeAll { $0.session.persistentIdentifier == id }
         }
+        if appHostedVolume && scene.session.role == .windowApplicationVolumetric {
+            handleAppHostedVolumeEvent(label, scene: scene)
+            return
+        }
         guard !isBridgeScene(scene) else { return }
         switch label {
         case "willDeactivate", "didEnterBackground", "didDisconnect":
@@ -1298,6 +1324,99 @@ public class Bridge {
         default:
             break
         }
+    }
+
+    // The App-hosted volume has no BridgeScene delegate, so mirror its callbacks here. Godot's own
+    // scene delegate already forwards focus in/out for this scene.
+    @MainActor
+    static func handleAppHostedVolumeEvent(_ label: String, scene: UIScene) {
+        let id = scene.session.persistentIdentifier
+        switch label {
+        case "willConnect":
+            bridgeSessionIDs.insert(id)
+        case "willEnterForeground":
+            bridgeSessionIDs.insert(id)
+            sceneVisible = true
+            logScene("app-hosted volume willEnterForeground; volume visible")
+        case "didActivate":
+            bridgeSessionIDs.insert(id)
+            resumeGodotFocus(reason: "app-hosted volume became active", scene: scene)
+        case "didEnterBackground":
+            sceneVisible = false
+            logScene("app-hosted volume didEnterBackground; volume hidden")
+        case "didDisconnect":
+            sceneVisible = false
+            bridgeSessionIDs.remove(id)
+        default:
+            break
+        }
+    }
+
+    // MARK: App-hosted volume
+
+    // Opens the shared volume through GDTExtensionVolume, a volumetric WindowGroup declared in the
+    // Godot template's SwiftUI App. Unlike UIKit scene activation, SwiftUI's openWindow applies
+    // .defaultWindowPlacement, so Utility Panel placement opens the volume within reach.
+    // Returns false if the Godot template doesn't provide the hook.
+    @MainActor
+    static func openAppHostedVolume() -> Bool {
+        guard let hostClass = NSClassFromString("GDTExtensionVolume") as AnyObject? else {
+            logScene("Godot template has no GDTExtensionVolume")
+            return false
+        }
+        let selectors = [
+            #selector(GDRKExtensionVolumeHost.setContent(_:)),
+            #selector(GDRKExtensionVolumeHost.setPlacementProvider(_:)),
+            #selector(GDRKExtensionVolumeHost.configure(_:)),
+            #selector(GDRKExtensionVolumeHost.open),
+        ]
+        guard selectors.allSatisfy({ hostClass.responds(to: $0) }) else {
+            logScene("GDTExtensionVolume is missing required methods")
+            return false
+        }
+        let host = unsafeBitCast(hostClass, to: GDRKExtensionVolumeHost.self)
+
+        let content = AnyView(SharedVolumetricRealityView(root: Bridge.root.value, delegate: Bridge.delegate)
+            .overlay{GodotViewControllerRepresentable()})
+        guard host.setContent(content) else {
+            logScene("GDTExtensionVolume rejected the volume content")
+            return false
+        }
+
+        let positionName = BridgeScene.volumePlacementPosition == nil ? "automatic" : "utilityPanel"
+        host.setPlacementProvider { windowIDs in
+            let windows = windowIDs.map { $0.isEmpty ? "(no id)" : $0 }.joined(separator: ", ")
+            MainActor.assumeIsolated {
+                Bridge.logScene("volume placement closure ran; windows=[\(windows)] -> \(positionName)")
+            }
+            return positionName
+        }
+
+        let size = BridgeScene.volumeDefaultSize
+        let alignment: String
+        switch delegate?.getExtensionSettings().volumeWorldAlignment {
+        case .adaptive: alignment = "adaptive"
+        case .gravityAligned: alignment = "gravityAligned"
+        default: alignment = "automatic"
+        }
+        let resizable = delegate?.getExtensionSettings().volumeResizable ?? true
+        host.configure([
+            "width": size.width,
+            "height": size.height,
+            "depth": size.depth,
+            "resizable": resizable,
+            "worldAlignment": alignment,
+        ] as NSDictionary)
+
+        appHostedVolume = true
+        guard host.open() else {
+            appHostedVolume = false
+            logScene("GDTExtensionVolume could not open the volume (no openWindow action)")
+            return false
+        }
+        logScene("opened app-hosted volume: size=\(size.width)x\(size.height)x\(size.depth)m placement=\(positionName) " +
+            "alignment=\(alignment) resizable=\(resizable)")
+        return true
     }
 
     @MainActor

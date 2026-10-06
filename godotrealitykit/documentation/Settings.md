@@ -20,7 +20,7 @@ The plugin adds these settings under **Project > Project Settings > RealityKit**
 | `reality_kit/portal_presentation_world_scale` | Float | 0.0 | Fixed world scale for the Portal Window presentation style. When non-zero, this replaces the interactive world scale slider shown in the portal window. |
 | `reality_kit/volume_default_size` | Vector3 | (0, 0, 0) | Default width, height and depth of the Volumetric Window, in meters. When any component is zero, the system default volume size is used. |
 | `reality_kit/volume_resizable` | Bool | true | Lets the user resize the Volumetric Window with its corner handle. The volume camera refits to the new size. |
-| `reality_kit/volume_default_placement` | Enum | Automatic | Where the Volumetric Window opens (Automatic, Utility Panel). Utility Panel opens the volume close to the user, within reach. |
+| `reality_kit/volume_default_placement` | Enum | Automatic | Where the Volumetric Window opens (Automatic, Utility Panel). Utility Panel opens the volume close to the user, within reach. Requires the visionOS export template that ships with the addon; other templates open the volume at the system default position. See [Volume placement](Troubleshooting.md#check-where-the-volume-opens). |
 | `reality_kit/volume_world_alignment` | Enum | Automatic | How the Volumetric Window aligns to the world (Automatic, Adaptive, Gravity Aligned). |
 | `reality_kit/debug_rendering_on_macos` | Bool | false | Renders through RealityKit when running on macOS, instead of Godot's normal renderer. See [Preview with RealityKit on macOS](#preview-with-realitykit-on-macos). |
 

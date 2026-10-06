@@ -31,6 +31,23 @@ resume. The messages appear in the Godot output and log file with the prefix
 log stream --level info --predicate 'subsystem == "com.apple.GodotRealityKit"'
 ```
 
+### Check where the volume opens
+
+`reality_kit/volume_default_placement`, `reality_kit/volume_default_size`,
+`reality_kit/volume_resizable` and `reality_kit/volume_world_alignment` apply when GodotRealityKit
+opens the Volumetric Window through the `GDTExtensionVolume` window that the addon's visionOS
+export template declares in Godot's SwiftUI app. visionOS only applies window placement to windows
+opened this way. With other export templates, GodotRealityKit opens the volume through UIKit, and
+the volume opens at the system default position, farther away.
+
+The scene log shows which path ran:
+
+- `opened app-hosted volume: size=... placement=...`, followed by
+  `volume placement closure ran; windows=[...] -> utilityPanel`, when the placement applies.
+- `opening the volume through UIKit; reality_kit/volume_default_placement has no effect on this path`
+  when it doesn't. The preceding line gives the reason, such as `Godot template has no GDTExtensionVolume`.
+- `volume bounds W x H x D m` whenever the volume's size changes, including when the user resizes it.
+
 ### Match the Debug and Release export templates
 
 If you only set up the Debug export template but export in Release, Xcode shows the following compilation error:
