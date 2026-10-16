@@ -119,6 +119,29 @@ def clone_or_fetch(url, branch, dest):
     subprocess.check_call(['git', 'fetch', 'origin', branch], cwd=dest)
     subprocess.check_call(['git', 'checkout', branch], cwd=dest)
 
+def list_patches(patch_dir):
+    if not os.path.isdir(patch_dir):
+        return []
+    return [os.path.join(patch_dir, name) for name in sorted(os.listdir(patch_dir)) if name.endswith('.patch')]
+
+def is_patch_applied(patch, dest):
+    return subprocess.call(['git', 'apply', '--reverse', '--check', patch], cwd=dest,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+def revert_patches(patch_dir, dest):
+    # Undo our patches so the checkout of a new ref doesn't trip over them.
+    if not os.path.isdir(dest):
+        return
+    for patch in reversed(list_patches(patch_dir)):
+        if is_patch_applied(patch, dest):
+            subprocess.check_call(['git', 'apply', '--reverse', patch], cwd=dest)
+
+def apply_patches(patch_dir, dest):
+    for patch in list_patches(patch_dir):
+        if is_patch_applied(patch, dest):
+            continue
+        subprocess.check_call(['git', 'apply', patch], cwd=dest)
+
 def build_godot(target_env):
     dd = godot_deps_dir()
     os.makedirs(dd, exist_ok=True)
@@ -157,7 +180,10 @@ def build_godot_cpp(target_env):
         print("ERROR: GODOT_CPP_URL and GODOT_CPP_BRANCH environment variables must be set")
         Exit(1)
 
+    godot_cpp_patches = os.path.join(REPO_DIR, 'patches', 'godot-cpp')
+    revert_patches(godot_cpp_patches, cppdir)
     clone_or_fetch(GODOT_CPP_URL, GODOT_CPP_BRANCH, cppdir)
+    apply_patches(godot_cpp_patches, cppdir)
     ext_api = os.path.join(dd, 'extension_api.json')
     tools_dir = os.path.join(REPO_DIR, 'tools')
 

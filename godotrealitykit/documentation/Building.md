@@ -63,3 +63,32 @@ addons/GodotRealityKit/
         GodotRealityKit.xcframework  # xros-arm64 + xros-arm64-simulator
         godot_visionos.zip
 ```
+
+## Building for Xogot
+
+[Xogot](https://xogot.com) runs the Godot editor and the game as two Godot 4.8 instances in one visionOS process, and hosts the game's volume in its own window. Build the plugin against Xogot's engine (branch `xogot-main-4.8-multi-visionos` of xibbon/godot-ios), not against the engine in `deps.conf`, using a shared workspace:
+
+```sh
+GDRK=$PWD
+ENGINE=<Xogot checkout>/godot-multi-instance
+DEPS=$GDRK/out/xogot_workspace/deps/debug
+CPP_COMMIT=$(sed -n 's/^GODOT_CPP_BRANCH=//p' deps.conf)
+mkdir -p $DEPS
+ln -s $ENGINE $DEPS/godot
+(cd $ENGINE && make update-api)
+cp $ENGINE/extension_api.json $DEPS/
+git clone https://github.com/godotengine/godot-cpp.git $DEPS/godot-cpp
+git -C $DEPS/godot-cpp checkout $CPP_COMMIT
+git -C $DEPS/godot-cpp apply $GDRK/patches/godot-cpp/*.patch
+cd $DEPS/godot-cpp
+scons platform=visionos target=template_debug custom_api_file=$DEPS/extension_api.json custom_tools=$GDRK/tools use_hot_reload=no
+scons platform=visionos target=template_debug visionos_simulator=yes custom_api_file=$DEPS/extension_api.json custom_tools=$GDRK/tools use_hot_reload=no
+ln -s libgodot-cpp.visionos.template_debug.arm64.a bin/libgodot-cpp.visionos.template.arm64.a
+ln -s libgodot-cpp.visionos.template_debug.arm64.simulator.a bin/libgodot-cpp.visionos.template.arm64.simulator.a
+cd $GDRK
+SHARED_WORKSPACE=out/xogot_workspace scons framework platform=visionos
+```
+
+The godot-cpp patch in `patches/godot-cpp/` is required in Xogot. Xogot initializes the library again for each game it plays, against a new engine instance, while the library image stays loaded. Without the patch, godot-cpp keeps the method binds and class registrations of the previous instance. `scons deps` applies the patches automatically; a shared workspace must apply them as shown above.
+
+Copy the resulting `out/workspace/build/visionOS/Debug/GodotRealityKit.xcframework` into the game's `addons/GodotRealityKit/visionos.template_debug/`. When Xogot hosts the plugin, `GDTExtensionVolume.managesGodotScenes` returns `YES`: Xogot drives the Godot instance loop and owns the volume window, and the plugin attaches its own Godot instance around every RealityKit and SwiftUI callback.

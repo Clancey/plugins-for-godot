@@ -1,0 +1,126 @@
+diff --git a/binding_generator.py b/binding_generator.py
+index 1a401a3..3e6d991 100644
+--- a/binding_generator.py
++++ b/binding_generator.py
+@@ -2151,7 +2151,10 @@ def generate_engine_class_source(class_api, used_classes, fully_used_classes, us
+ 
+             # Method body.
+             result.append(
+-                f'\tstatic GDExtensionMethodBindPtr _gde_method_bind = ::godot::gdextension_interface::classdb_get_method_bind({class_name}::get_class_static()._native_ptr(), StringName("{method["name"]}")._native_ptr(), {method["hash"]});'
++                "\tstatic ::godot::internal::MethodBindCache _gde_method_bind_cache;"
++            )
++            result.append(
++                f'\tGDExtensionMethodBindPtr _gde_method_bind = _gde_method_bind_cache.get([]() {{ return ::godot::gdextension_interface::classdb_get_method_bind({class_name}::get_class_static()._native_ptr(), StringName("{method["name"]}")._native_ptr(), {method["hash"]}); }});'
+             )
+             method_call = "\t"
+             has_return = "return_value" in method and method["return_value"]["type"] != "void"
+diff --git a/include/godot_cpp/classes/wrapped.hpp b/include/godot_cpp/classes/wrapped.hpp
+index fbfc842..9653cbd 100644
+--- a/include/godot_cpp/classes/wrapped.hpp
++++ b/include/godot_cpp/classes/wrapped.hpp
+@@ -240,8 +240,9 @@ public:
+ 	typedef m_inherits parent_type;                                                                                                                                                    \
+                                                                                                                                                                                        \
+ 	static void initialize_class() {                                                                                                                                                   \
+-		static bool initialized = false;                                                                                                                                               \
+-		if (initialized) {                                                                                                                                                             \
++		static uint32_t initialized_generation = 0;                                                                                                                                    \
++		uint32_t current_generation = ::godot::internal::binding_generation.load(std::memory_order_acquire);                                                                           \
++		if (initialized_generation == current_generation) {                                                                                                                            \
+ 			return;                                                                                                                                                                    \
+ 		}                                                                                                                                                                              \
+ 		m_inherits::initialize_class();                                                                                                                                                \
+@@ -249,7 +250,7 @@ public:
+ 			_bind_methods();                                                                                                                                                           \
+ 			m_inherits::register_virtuals<m_class, m_inherits>();                                                                                                                      \
+ 		}                                                                                                                                                                              \
+-		initialized = true;                                                                                                                                                            \
++		initialized_generation = current_generation;                                                                                                                                   \
+ 	}                                                                                                                                                                                  \
+                                                                                                                                                                                        \
+ 	static const ::godot::StringName &get_class_static() {                                                                                                                             \
+diff --git a/include/godot_cpp/godot.hpp b/include/godot_cpp/godot.hpp
+index 9c4f4eb..1698caf 100644
+--- a/include/godot_cpp/godot.hpp
++++ b/include/godot_cpp/godot.hpp
+@@ -32,6 +32,9 @@
+ 
+ #include <godot_cpp/core/gdextension_interface_loader.hpp>
+ 
++#include <atomic>
++#include <cstdint>
++
+ namespace godot {
+ 
+ namespace gdextension_interface {
+@@ -55,6 +58,29 @@ public:
+ 	DocDataRegistration(const char *p_hash, int p_uncompressed_size, int p_compressed_size, const unsigned char *p_data);
+ };
+ 
++// Incremented every time the library is bound to an engine instance. A library image can be
++// bound to several engine instances over its lifetime, and anything cached from a previous
++// binding (method binds, class registration) must be fetched again for the new one.
++extern std::atomic<uint32_t> binding_generation;
++
++class MethodBindCache {
++	std::atomic<GDExtensionMethodBindPtr> method_bind{ nullptr };
++	std::atomic<uint32_t> generation{ 0 };
++
++public:
++	template <typename F>
++	inline GDExtensionMethodBindPtr get(F p_fetch) {
++		uint32_t current = binding_generation.load(std::memory_order_acquire);
++		if (generation.load(std::memory_order_acquire) == current) {
++			return method_bind.load(std::memory_order_relaxed);
++		}
++		GDExtensionMethodBindPtr fetched = p_fetch();
++		method_bind.store(fetched, std::memory_order_relaxed);
++		generation.store(current, std::memory_order_release);
++		return fetched;
++	}
++};
++
+ } // namespace internal
+ 
+ enum ModuleInitializationLevel {
+diff --git a/src/godot.cpp b/src/godot.cpp
+index 5ffc758..4acf78b 100644
+--- a/src/godot.cpp
++++ b/src/godot.cpp
+@@ -91,6 +91,8 @@ DocDataRegistration::DocDataRegistration(const char *p_hash, int p_uncompressed_
+ 	doc_data.data = p_data;
+ }
+ 
++std::atomic<uint32_t> binding_generation{ 0 };
++
+ } // namespace internal
+ 
+ bool GDExtensionBinding::api_initialized = false;
+@@ -146,6 +148,7 @@ GDExtensionBool GDExtensionBinding::init(GDExtensionInterfaceGetProcAddress p_ge
+ 	::godot::gdextension_interface::get_proc_address = p_get_proc_address;
+ 	::godot::gdextension_interface::library = p_library;
+ 	::godot::gdextension_interface::token = p_library;
++	::godot::internal::binding_generation.fetch_add(1, std::memory_order_acq_rel);
+ 
+ #if GODOT_VERSION_MINOR >= 5
+ 	LOAD_PROC_ADDRESS(get_godot_version2, GDExtensionInterfaceGetGodotVersion2);
+@@ -246,6 +249,19 @@ void GDExtensionBinding::deinitialize_level(void *p_userdata, GDExtensionInitial
+ 		EditorPlugins::deinitialize(p_level);
+ 		ClassDB::deinitialize(p_level);
+ 	}
++
++	// Once every level is torn down the engine instance is gone. Clear the binding so a later
++	// instance that loads this same image runs the full init instead of reusing stale state.
++	bool any_level_initialized = false;
++	for (int i = 0; i < MODULE_INITIALIZATION_LEVEL_MAX; i++) {
++		if (level_initialized[i] > 0) {
++			any_level_initialized = true;
++			break;
++		}
++	}
++	if (!any_level_initialized) {
++		api_initialized = false;
++	}
+ }
+ 
+ void GDExtensionBinding::InitDataList::add(InitData *p_data) {
