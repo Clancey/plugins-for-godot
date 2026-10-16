@@ -29,6 +29,7 @@
 #endif
 
 #include "Materials/exporter.h"
+#include "instance_scope.h"
 
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -45,10 +46,76 @@
 
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
+#import <objc/message.h>
 
 namespace gdrk {
 
+namespace {
+
+// Interface functions of a multi-instance host (Xogot's engine), see instance_scope.h.
+typedef uint8_t (*InstanceGetCurrentFunction)();
+typedef uint8_t (*InstanceAttachFunction)(uint8_t p_instance_id);
+
+InstanceGetCurrentFunction instance_get_current = nullptr;
+InstanceAttachFunction instance_attach = nullptr;
+uint8_t library_instance = 0;
+bool library_instance_alive = true;
+
+} // namespace
+
+bool is_host_managed() {
+	Class host = NSClassFromString(@"GDTExtensionVolume");
+	SEL selector = NSSelectorFromString(@"managesGodotScenes");
+	if (host == nil || ![host respondsToSelector:selector]) {
+		return false;
+	}
+	typedef bool (*ManagesGodotScenesFunction)(Class, SEL);
+	ManagesGodotScenesFunction manages_godot_scenes = (ManagesGodotScenesFunction)objc_msgSend;
+	return manages_godot_scenes(host, selector);
+}
+
+void instance_scope_setup(GDExtensionInterfaceGetProcAddress p_get_proc_address) {
+	if (!is_host_managed()) {
+		return;
+	}
+	InstanceGetCurrentFunction get_current = (InstanceGetCurrentFunction)p_get_proc_address("instance_get_current");
+	InstanceAttachFunction attach = (InstanceAttachFunction)p_get_proc_address("instance_attach");
+	if (get_current == nullptr || attach == nullptr) {
+		return;
+	}
+	instance_get_current = get_current;
+	instance_attach = attach;
+	library_instance = get_current();
+	library_instance_alive = true;
+}
+
+void instance_scope_shutdown() {
+	library_instance_alive = false;
+}
+
+InstanceScope::InstanceScope() {
+	if (instance_attach == nullptr) {
+		return;
+	}
+	if (!library_instance_alive) {
+		valid = false;
+		return;
+	}
+	if (instance_get_current() == library_instance) {
+		return;
+	}
+	previous_instance = instance_attach(library_instance);
+	restore = true;
+}
+
+InstanceScope::~InstanceScope() {
+	if (restore) {
+		instance_attach(previous_instance);
+	}
+}
+
 void install_renderer_relaunch_guard();
+void reset_bridge_delegate_caches();
 
 void initialize_gdrk_module(godot::ModuleInitializationLevel p_level) {
 	godot::ProjectSettings *project_settings = godot::ProjectSettings::get_singleton();
@@ -57,7 +124,10 @@ void initialize_gdrk_module(godot::ModuleInitializationLevel p_level) {
 		// This is a setting required by all Godot visionOS projects, so we set it for convenience here
 		project_settings->set_setting("rendering/textures/vram_compression/import_etc2_astc", true);
 
-		install_renderer_relaunch_guard();
+		// A managed host owns the Godot renderer and may run other Godot instances with it.
+		if (!is_host_managed()) {
+			install_renderer_relaunch_guard();
+		}
 	}
 
 	if (p_level == godot::MODULE_INITIALIZATION_LEVEL_SCENE) {
@@ -94,7 +164,9 @@ void initialize_gdrk_module(godot::ModuleInitializationLevel p_level) {
 }
 
 void uninitialize_gdrk_module(godot::ModuleInitializationLevel p_level) {
-	if (p_level == godot::MODULE_INITIALIZATION_LEVEL_EDITOR) {
+	if (p_level == godot::MODULE_INITIALIZATION_LEVEL_SCENE) {
+		instance_scope_shutdown();
+		reset_bridge_delegate_caches();
 	}
 }
 
@@ -119,14 +191,17 @@ GDRKTransform GDRKTransform::identity = GDRKTransform{
 };
 
 void GDRKBridgeDelegate::printError(const char *p_msg) {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	ERR_PRINT(p_msg);
 }
 
 void GDRKBridgeDelegate::printWarning(const char *p_msg) {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	WARN_PRINT(p_msg);
 }
 
 void GDRKBridgeDelegate::printMessage(const char *p_msg) {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	godot::UtilityFunctions::print(godot::String::utf8(p_msg));
 }
 
@@ -153,9 +228,24 @@ bool GDRKBridgeDelegate::ExtensionSettings::should_convert_world_environment() c
 	}
 }
 
+// Cached for the engine instance that is running the game. A later instance can load this same
+// image, so reset_bridge_delegate_caches() clears these when the instance tears down.
+static bool extension_settings_fetched = false;
+static GDRKBridgeDelegate::ExtensionSettings extension_settings;
+static bool phase_manager_looked_up = false;
+static godot::Object *phase_manager = nullptr;
+
+void gdrk::reset_bridge_delegate_caches() {
+	extension_settings_fetched = false;
+	extension_settings = GDRKBridgeDelegate::ExtensionSettings();
+	phase_manager_looked_up = false;
+	phase_manager = nullptr;
+}
+
 GDRKBridgeDelegate::ExtensionSettings GDRKBridgeDelegate::getExtensionSettings() const {
-	static bool fetched = false;
-	static GDRKBridgeDelegate::ExtensionSettings cached;
+	GDRK_INSTANCE_SCOPE_OR_RETURN(ExtensionSettings{});
+	bool &fetched = extension_settings_fetched;
+	GDRKBridgeDelegate::ExtensionSettings &cached = extension_settings;
 	if (!fetched) {
 		fetched = true;
 		godot::ProjectSettings *project_settings = godot::ProjectSettings::get_singleton();
@@ -312,8 +402,6 @@ godot::Quaternion convert(simd_quatf value) {
 	return godot::Quaternion(vector.x, vector.y, vector.z, vector.w);
 }
 
-static godot::Object *phase_manager = nullptr;
-
 void GDRKBridgeDelegate::initialize_phase_manager() const {
 	godot::SceneTree *scene_tree = gdrk::get_scene_tree();
 
@@ -346,10 +434,11 @@ void GDRKBridgeDelegate::initialize_phase_manager() const {
 }
 
 void GDRKBridgeDelegate::setPHASETransform(GDRKTransform gdrk_transform) const {
-	static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
+	if (!phase_manager_looked_up) {
+		phase_manager_looked_up = true;
 		initialize_phase_manager();
-	});
+	}
 
 	if (phase_manager == nullptr) {
 		return;
@@ -367,12 +456,14 @@ void GDRKBridgeDelegate::setPHASETransform(GDRKTransform gdrk_transform) const {
 
 #if TARGET_OS_OSX
 NSWindow *GDRKBridgeDelegate::getDisplayServerWindow() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(nil);
 	godot::DisplayServer *display_server = godot::DisplayServer::get_singleton();
 	const uint64_t window_u64 = display_server->window_get_native_handle(godot::DisplayServer::WINDOW_HANDLE);
 	return (__bridge NSWindow *)(void *)window_u64;
 }
 #else
 UIViewController *GDRKBridgeDelegate::getDisplayServerViewController() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(nil);
 	godot::DisplayServer *display_server = godot::DisplayServer::get_singleton();
 	const uint64_t view_controller_u64 = display_server->window_get_native_handle(godot::DisplayServer::WINDOW_HANDLE);
 	UIViewController *view_controller = (__bridge UIViewController *)(void *)view_controller_u64;
@@ -380,6 +471,7 @@ UIViewController *GDRKBridgeDelegate::getDisplayServerViewController() const {
 }
 
 UIImage *GDRKBridgeDelegate::getBootSplashImage() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(nil);
 	godot::ProjectSettings *ps = godot::ProjectSettings::get_singleton();
 
 	bool show_image = ps->get_setting("application/boot_splash/show_image", true);
@@ -418,6 +510,7 @@ UIImage *GDRKBridgeDelegate::getBootSplashImage() const {
 }
 
 UIColor *GDRKBridgeDelegate::getBootSplashBgColor() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(nil);
 	godot::ProjectSettings *ps = godot::ProjectSettings::get_singleton();
 	godot::Color color = godot::Color(ps->get_setting("application/boot_splash/bg_color", godot::Color(0.14, 0.14, 0.14)));
 	return [UIColor colorWithRed:color.r green:color.g blue:color.b alpha:color.a];
@@ -425,10 +518,12 @@ UIColor *GDRKBridgeDelegate::getBootSplashBgColor() const {
 #endif
 
 void *GDRKBridgeDelegate::getCameraEntity() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(nullptr);
 	return loader->get_nodes()->get_cameras().get_current_entity().getRawPointer();
 }
 
 void GDRKBridgeDelegate::onWorldScaleChanged(float p_scale) const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	loader->get_materials()->set_world_scale(p_scale);
 	loader->get_nodes()->get_directional_lights().set_world_scale(p_scale);
 	loader->get_nodes()->get_point_lights().set_world_scale(p_scale);
@@ -437,10 +532,12 @@ void GDRKBridgeDelegate::onWorldScaleChanged(float p_scale) const {
 
 #if TARGET_OS_OSX
 void GDRKBridgeDelegate::onWindowResized(simd_float2 p_new_size) const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	loader->set_viewport_size(godot::Vector3(p_new_size.x, p_new_size.y, 1024.0));
 }
 #else
 void GDRKBridgeDelegate::onWindowResized(simd_float3 p_new_size) const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	loader->set_viewport_size(gdrk::from_simd3(p_new_size));
 }
 #endif
@@ -458,6 +555,7 @@ void GDRKBridgeDelegate::onEntityPressUpdate(int64_t p_event_id,
 		GDRKRay p_selection_ray,
 		bool p_has_chirality,
 		uint32_t p_chirality) const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	uint32_t cur_press_idx = 0;
 	bool is_first_press = true;
 	for (uint32_t press_idx = 0; press_idx < loader->max_active_presses; press_idx++) {
@@ -560,6 +658,7 @@ void GDRKBridgeDelegate::onEntityPressUpdate(int64_t p_event_id,
 }
 
 GDRKTransform GDRKBridgeDelegate::getXROrigin() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(GDRKTransform::identity);
 	godot::XRServer *xr_server = godot::XRServer::get_singleton();
 	ERR_FAIL_NULL_V(xr_server, GDRKTransform::identity);
 
@@ -573,10 +672,12 @@ GDRKTransform GDRKBridgeDelegate::getXROrigin() const {
 }
 
 bool GDRKBridgeDelegate::wantsControllerAnchors() const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN(false);
 	return gdrk::RealityControllerXRInterface::get_active() != nullptr;
 }
 
 void GDRKBridgeDelegate::setControllerAnchor(ControllerHand p_hand, GDRKTransform p_transform, bool p_tracked) const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	gdrk::RealityControllerXRInterface *controller_interface = gdrk::RealityControllerXRInterface::get_active();
 	if (controller_interface == nullptr) {
 		return;
@@ -595,6 +696,7 @@ void GDRKBridgeDelegate::setControllerAnchor(ControllerHand p_hand, GDRKTransfor
 }
 
 void GDRKBridgeDelegate::setControllerInput(ControllerHand p_hand, void *p_gc_controller) const {
+	GDRK_INSTANCE_SCOPE_OR_RETURN();
 	gdrk::RealityControllerXRInterface *controller_interface = gdrk::RealityControllerXRInterface::get_active();
 	if (controller_interface == nullptr || p_gc_controller == nullptr) {
 		return;
@@ -661,6 +763,7 @@ GDExtensionBool GDE_EXPORT gdrk_extension_init(GDExtensionInterfaceGetProcAddres
 	gdrk::testing::GodotXCTestNode::init_dependencies(p_get_proc_address, p_library, r_initialization);
 #endif
 	godot::GDExtensionBinding::InitObject init_obj(p_get_proc_address, p_library, r_initialization);
+	gdrk::instance_scope_setup(p_get_proc_address);
 
 	init_obj.register_initializer(gdrk::initialize_gdrk_module);
 	init_obj.register_terminator(gdrk::uninitialize_gdrk_module);

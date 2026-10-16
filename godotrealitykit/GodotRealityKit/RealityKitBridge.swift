@@ -708,6 +708,10 @@ struct SharedVolumetricRealityView : View {
     func setPlacementProvider(_ provider: @escaping ([String]) -> String)
     func configure(_ options: NSDictionary)
     func open() -> Bool
+    // A host that returns true runs Godot instances itself (for example an editor that plays the
+    // game in a second instance) and owns their windows and game loop.
+    @objc optional func managesGodotScenes() -> Bool
+    @objc optional func close()
 }
 
 class LoadingViewController: UIViewController {
@@ -1116,6 +1120,11 @@ public class Bridge {
 
 #else
         assumeMainActor(delegate) { delegate in
+            if Self.hostManaged {
+                Self.initializeHosted()
+                return
+            }
+
             Self.originalViewController = delegate.getDisplayServerViewController()
             Self.bootSplashImage = delegate.getBootSplashImage()
             Self.bootSplashBgColor = delegate.getBootSplashBgColor()
@@ -1180,6 +1189,23 @@ public class Bridge {
 
     public static func getRoot() -> Entity {
         MainActor.assumeIsolated{ Self.root }
+    }
+
+    // Called when the RealitySceneTree finalizes. The process keeps running after the game quits
+    // when a host manages the Godot instances, so release everything that refers to this game.
+    public static func shutdown() {
+        MainActor.assumeIsolated {
+            Self.sceneVisible = false
+            Self.delegate = nil
+            #if !os(macOS)
+            if Self.appHostedVolume, let host = Self.extensionVolumeHost {
+                host.close?()
+            }
+            Self.appHostedVolume = false
+            #endif
+            Self.root.value.removeFromParent()
+            Self.root = Entity.initAndMaterialize()
+        }
     }
 
     public static func isSceneVisible() -> Bool {
@@ -1359,10 +1385,9 @@ public class Bridge {
     // .defaultWindowPlacement, so Utility Panel placement opens the volume within reach.
     // Returns false if the Godot template doesn't provide the hook.
     @MainActor
-    static func openAppHostedVolume() -> Bool {
+    static var extensionVolumeHost: GDRKExtensionVolumeHost? {
         guard let hostClass = NSClassFromString("GDTExtensionVolume") as AnyObject? else {
-            logScene("Godot template has no GDTExtensionVolume")
-            return false
+            return nil
         }
         let selectors = [
             #selector(GDRKExtensionVolumeHost.setContent(_:)),
@@ -1372,12 +1397,58 @@ public class Bridge {
         ]
         guard selectors.allSatisfy({ hostClass.responds(to: $0) }) else {
             logScene("GDTExtensionVolume is missing required methods")
+            return nil
+        }
+        return unsafeBitCast(hostClass, to: GDRKExtensionVolumeHost.self)
+    }
+
+    @MainActor
+    static var hostManaged: Bool {
+        extensionVolumeHost?.managesGodotScenes?() ?? false
+    }
+
+    // The host runs this Godot instance's loop and owns its windows, so only provide the volume.
+    @MainActor
+    static func initializeHosted() {
+        if presentationStyle != .sharedVolumetric {
+            let message = "GodotRealityKit: this host only supports the Volumetric Window presentation style; showing the game in a volume."
+            message.withCString { cString in
+                delegate?.printWarning(cString)
+            }
+        }
+        presentationStyle = .sharedVolumetric
+        logScene("host manages Godot scenes; opening the app-hosted volume")
+        if !openAppHostedVolume() {
+            let message = "GodotRealityKit: the host could not open the RealityKit volume."
+            message.withCString { cString in
+                delegate?.printError(cString)
+            }
+        }
+    }
+
+    @MainActor
+    static func openAppHostedVolume() -> Bool {
+        guard let host = extensionVolumeHost else {
+            logScene("Godot template has no GDTExtensionVolume")
             return false
         }
-        let host = unsafeBitCast(hostClass, to: GDRKExtensionVolumeHost.self)
 
-        let content = AnyView(SharedVolumetricRealityView(root: Bridge.root.value, delegate: Bridge.delegate)
-            .overlay{GodotViewControllerRepresentable()})
+        let realityView = SharedVolumetricRealityView(root: Bridge.root.value, delegate: Bridge.delegate)
+        let content: AnyView
+        if host.managesGodotScenes?() ?? false {
+            // The host iterates Godot; the volume's visibility gates RealitySceneTree processing.
+            content = AnyView(realityView
+                .onAppear {
+                    Bridge.sceneVisible = true
+                    Bridge.logScene("app-hosted volume appeared; volume visible")
+                }
+                .onDisappear {
+                    Bridge.sceneVisible = false
+                    Bridge.logScene("app-hosted volume disappeared; volume hidden")
+                })
+        } else {
+            content = AnyView(realityView.overlay{GodotViewControllerRepresentable()})
+        }
         guard host.setContent(content) else {
             logScene("GDTExtensionVolume rejected the volume content")
             return false

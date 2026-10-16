@@ -11,6 +11,7 @@
 
 #import "scene_tree.h"
 #import "controller_xr_interface.h"
+#include "instance_scope.h"
 #import "node_loaders.h"
 #import "resource_loaders.h"
 
@@ -366,6 +367,13 @@ void RealitySceneTree::_initialize() {
 	}
 }
 
+void RealitySceneTree::_finalize() {
+	if (loader) {
+		bridge.shutdown();
+	}
+	godot::SceneTree::_finalize();
+}
+
 bool RealitySceneTree::_process(double p_time) {
 	PROFILE_FUNC_SCOPE;
 	if (!enabled) {
@@ -427,7 +435,7 @@ void RealitySceneTree::clear_boot_image() {
 	godot::Ref<godot::Image> empty_boot_logo;
 	empty_boot_logo.instantiate();
 	empty_boot_logo->set_data(1, 1, false, godot::Image::FORMAT_RGBA8, empty_boot_logo_data);
-	rendering_server->set_boot_image(empty_boot_logo, godot::Color(0.0, 0.0, 0.0, 0.0), false);
+	rendering_server->set_boot_image(empty_boot_logo, godot::Color(0.0, 0.0, 0.0, 0.0), false, godot::DisplayServer::MAIN_WINDOW_ID);
 }
 
 void RealitySceneTree::dump_reality_file_and_quit() {
@@ -439,6 +447,7 @@ void RealitySceneTree::dump_reality_file_and_quit() {
 		NSURL *file_path = [tmp_dir URLByAppendingPathComponent:ns_file_name];
 
 		GDRKEntityWriteDelegate entity_write_delegate = GDRKEntityWriteDelegate([this] {
+			GDRK_INSTANCE_SCOPE_OR_RETURN();
 			quit();
 		});
 

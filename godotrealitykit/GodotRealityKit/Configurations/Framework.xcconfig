@@ -19,7 +19,11 @@ MODULEMAP_FILE = $(PROJECT_DIR)/GodotRealityKit.modulemap
 MODULE_VERIFIER_SUPPORTED_LANGUAGES = objective-c objective-c++
 MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = gnu17 gnu++20
 
-OTHER_CPLUSPLUSFLAGS = $(OTHER_CFLAGS)
+// A multi-instance host can load one copy of this library per Godot instance. Hidden symbols keep
+// dyld from coalescing each copy's weak godot-cpp template code onto the first copy loaded. Set
+// as flags because ENABLE_TESTABILITY turns GCC_SYMBOLS_PRIVATE_EXTERN off in Debug.
+OTHER_CFLAGS = $(inherited) -fvisibility=hidden
+OTHER_CPLUSPLUSFLAGS = $(OTHER_CFLAGS) -fvisibility-inlines-hidden
 
 PRODUCT_BUNDLE_IDENTIFIER = com.example.GodotRealityKit
 PRODUCT_NAME = $(TARGET_NAME:c99extidentifier)

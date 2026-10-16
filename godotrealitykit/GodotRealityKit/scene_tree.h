@@ -136,6 +136,7 @@ public:
 	~RealitySceneTree() override;
 
 	void _initialize() override;
+	void _finalize() override;
 
 	bool _process(double p_time) override;
 	bool _physics_process(double p_time) override;

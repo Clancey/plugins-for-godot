@@ -16,6 +16,7 @@
 #import "node_defs.h"
 #import "snippets.h"
 #import "visual_program_builder.h"
+#include "instance_scope.h"
 
 #include <godot_cpp/classes/file_access.hpp>
 
@@ -51,6 +52,7 @@ uint32_t ProgramCache::load_usda(ProgramDescription &&p_desc, swift::String &con
 
 	GodotRealityKit::SGLProgram::load("/bm", content,
 			GDRKMaterialLoadDelegate([this, program_idx, finalize = std::move(p_finalize_callback)](void *p_material_load_result) {
+				GDRK_INSTANCE_SCOPE_OR_RETURN();
 				GodotRealityKit::SGLMaterialLoadResult material_load_result =
 						GodotRealityKit::SGLMaterialLoadResult::fromRawPointer(p_material_load_result);
 
