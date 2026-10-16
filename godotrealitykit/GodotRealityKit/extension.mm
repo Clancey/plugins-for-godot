@@ -69,6 +69,7 @@ void initialize_gdrk_module(godot::ModuleInitializationLevel p_level) {
 		GDREGISTER_RUNTIME_CLASS(MeshLoader);
 		GDREGISTER_RUNTIME_CLASS(MultiMeshLoader);
 		GDREGISTER_RUNTIME_CLASS(ShapeLoader);
+		GDREGISTER_RUNTIME_CLASS(SkeletonLoader);
 		GDREGISTER_RUNTIME_CLASS(NodeLoaders);
 		GDREGISTER_RUNTIME_CLASS(RealityControllerXRInterface);
 		GDREGISTER_CLASS(RealityVolumeCamera3D);

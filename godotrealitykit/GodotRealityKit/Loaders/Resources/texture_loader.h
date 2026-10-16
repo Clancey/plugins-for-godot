@@ -91,8 +91,12 @@ private:
 		}
 	};
 
+	static bool needs_swizzle_bake(id<MTLTexture> p_texture);
+	void encode_copy(id<MTLCommandBuffer> p_command_buffer, id<MTLTexture> p_src, id<MTLTexture> p_dst);
+
 	RID_Associated<uint32_t> texture_rid_to_idx;
 	godot::LocalVector<Texture> textures;
+	id<MTLComputePipelineState> swizzle_bake_pso = nil;
 };
 
 } //namespace gdrk

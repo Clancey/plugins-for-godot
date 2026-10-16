@@ -86,12 +86,16 @@ ProgramDescription get_label_material_description(godot::Label3D *p_node, bool p
 	}
 
 	// We currently hope that if this base font RID has MSDF textures,
-	// then the rest of the font variations also use MSDF textures
+	// then the rest of the font variations also use MSDF textures.
+	// Font::get_rid() is empty through the extension API, so use the first of the RIDs Label3D shapes with.
 	const godot::Ref<godot::Font> font = p_node->get_font();
-	godot::Ref<godot::TextServer> text_server =
-			godot::TextServerManager::get_singleton()->get_primary_interface();
-	if (font.is_valid() && text_server->font_is_multichannel_signed_distance_field(font->get_rid())) {
-		flags |= (1 << BM::FLAG_ALBEDO_TEXTURE_MSDF);
+	if (font.is_valid()) {
+		const godot::TypedArray<godot::RID> font_rids = font->get_rids();
+		godot::Ref<godot::TextServer> text_server =
+				godot::TextServerManager::get_singleton()->get_primary_interface();
+		if (!font_rids.is_empty() && text_server->font_is_multichannel_signed_distance_field(font_rids[0])) {
+			flags |= (1 << BM::FLAG_ALBEDO_TEXTURE_MSDF);
+		}
 	}
 
 	return BaseMaterial3DDescription{

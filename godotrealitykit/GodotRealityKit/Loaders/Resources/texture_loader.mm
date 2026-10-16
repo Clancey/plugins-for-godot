@@ -14,6 +14,68 @@
 
 using namespace gdrk;
 
+// RealityKit ignores the swizzle of a LowLevelTexture, so swizzled formats such as
+// Godot's luminance textures (RG8 read as RRRG) are expanded to RGBA8 on upload.
+bool TextureLoader::needs_swizzle_bake(id<MTLTexture> p_texture) {
+	const MTLTextureSwizzleChannels swizzle = [p_texture swizzle];
+	if (swizzle.red == MTLTextureSwizzleRed && swizzle.green == MTLTextureSwizzleGreen && swizzle.blue == MTLTextureSwizzleBlue && swizzle.alpha == MTLTextureSwizzleAlpha) {
+		return false;
+	}
+	if ([p_texture textureType] != MTLTextureType2D) {
+		return false;
+	}
+	switch ([p_texture pixelFormat]) {
+		case MTLPixelFormatR8Unorm:
+		case MTLPixelFormatRG8Unorm:
+		case MTLPixelFormatRGBA8Unorm:
+		case MTLPixelFormatBGRA8Unorm:
+			return true;
+		default:
+			return false;
+	}
+}
+
+void TextureLoader::encode_copy(id<MTLCommandBuffer> p_command_buffer, id<MTLTexture> p_src, id<MTLTexture> p_dst) {
+	if (!needs_swizzle_bake(p_src)) {
+		id<MTLBlitCommandEncoder> blit_encoder = [p_command_buffer blitCommandEncoder];
+		[blit_encoder copyFromTexture:p_src toTexture:p_dst];
+		[blit_encoder endEncoding];
+		return;
+	}
+
+	if (swizzle_bake_pso == nil) {
+		NSError *error = nil;
+		id<MTLDevice> device = [p_command_buffer device];
+		id<MTLLibrary> library = [device newDefaultLibraryWithBundle:get_gdrk_bundle() error:&error];
+		ERR_FAIL_NULL_MSG(library, "Failed to load the GodotRealityKit Metal library");
+		id<MTLFunction> function = [library newFunctionWithName:@"bakeSwizzle"];
+		ERR_FAIL_NULL_MSG(function, "Failed to find the bakeSwizzle function");
+		swizzle_bake_pso = [device newComputePipelineStateWithFunction:function error:&error];
+		ERR_FAIL_NULL_MSG(swizzle_bake_pso, "Failed to create the bakeSwizzle pipeline state");
+	}
+
+	const NSUInteger w = [swizzle_bake_pso threadExecutionWidth];
+	const NSUInteger h = [swizzle_bake_pso maxTotalThreadsPerThreadgroup] / w;
+	const NSUInteger levels = godot::MIN([p_src mipmapLevelCount], [p_dst mipmapLevelCount]);
+	id<MTLComputeCommandEncoder> encoder = [p_command_buffer computeCommandEncoder];
+	[encoder setComputePipelineState:swizzle_bake_pso];
+	[encoder setTexture:p_src atIndex:0];
+	for (NSUInteger level = 0; level < levels; level++) {
+		id<MTLTexture> dst_level = [p_dst newTextureViewWithPixelFormat:[p_dst pixelFormat]
+															textureType:MTLTextureType2D
+																 levels:NSMakeRange(level, 1)
+																 slices:NSMakeRange(0, 1)];
+		const uint32_t level_index = (uint32_t)level;
+		[encoder setTexture:dst_level atIndex:1];
+		[encoder setBytes:&level_index length:sizeof(level_index) atIndex:0];
+		const NSUInteger width = [dst_level width];
+		const NSUInteger height = [dst_level height];
+		[encoder dispatchThreadgroups:MTLSizeMake((width + w - 1) / w, (height + h - 1) / h, 1)
+				threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+	}
+	[encoder endEncoding];
+}
+
 uint32_t TextureLoader::find_or_add(godot::RID p_texture_rid, godot::Ref<godot::Texture2D> p_texture, TextureUsage p_usage) {
 	uint32_t idx = UINT32_MAX;
 
@@ -118,23 +180,26 @@ bool TextureLoader::update(id<MTLCommandBuffer> p_command_buffer) {
 									.format(godot::Array{ texture_path }));
 				}
 
+				const bool bake_swizzle = needs_swizzle_bake(src_texture);
+				MTLTextureUsage dst_usage = [src_texture usage];
+				if (bake_swizzle) {
+					dst_usage |= MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+				}
 				swift::Optional<GodotRealityKit::LowLevelTexture> low_level_texture =
 						GodotRealityKit::LowLevelTexture::init([src_texture textureType],
-								[src_texture pixelFormat],
+								bake_swizzle ? MTLPixelFormatRGBA8Unorm : [src_texture pixelFormat],
 								[src_texture width],
 								[src_texture height],
 								[src_texture depth],
 								[src_texture mipmapLevelCount],
 								[src_texture arrayLength],
-								[src_texture usage],
-								[src_texture swizzle]);
+								dst_usage,
+								bake_swizzle ? MTLTextureSwizzleChannelsDefault : [src_texture swizzle]);
 
 				ERR_FAIL_COND_V_MSG(low_level_texture.isNone(), LocalBitVector::IterationResult::SKIPPED, "Failed to create low level texture");
 
 				id<MTLTexture> dst_texture = low_level_texture.get().replace(p_command_buffer);
-				id<MTLBlitCommandEncoder> blit_encoder = [p_command_buffer blitCommandEncoder];
-				[blit_encoder copyFromTexture:src_texture toTexture:dst_texture];
-				[blit_encoder endEncoding];
+				encode_copy(p_command_buffer, src_texture, dst_texture);
 
 				swift::Optional<GodotRealityKit::TextureResource> resource = GodotRealityKit::TextureResource::init(low_level_texture.get());
 				ERR_FAIL_COND_V(resource.isNone(), LocalBitVector::IterationResult::SKIPPED);
@@ -157,9 +222,7 @@ bool TextureLoader::update(id<MTLCommandBuffer> p_command_buffer) {
 					ERR_FAIL_COND_V(!texture.resource_linear.isSome(), LocalBitVector::IterationResult::SKIPPED);
 					dst_texture = texture.resource_linear.lowLevelTexture().get().replace(p_command_buffer);
 				}
-				id<MTLBlitCommandEncoder> blit_encoder = [p_command_buffer blitCommandEncoder];
-				[blit_encoder copyFromTexture:src_texture toTexture:dst_texture];
-				[blit_encoder endEncoding];
+				encode_copy(p_command_buffer, src_texture, dst_texture);
 			}
 
 			if (texture.purge_after_upload) {

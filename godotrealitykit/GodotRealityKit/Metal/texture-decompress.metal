@@ -23,3 +23,15 @@ kernel void decompress(texture2d<half, access::sample> sourceTexture [[texture(0
 	half4 color = sourceTexture.read(gid);
 	destinationTexture.write(color, gid);
 }
+
+// Copies one mip level while applying the source texture's swizzle, which a blit ignores.
+kernel void bakeSwizzle(texture2d<half, access::read> sourceTexture [[texture(0)]],
+		texture2d<half, access::write> destinationTexture [[texture(1)]],
+		constant uint &level [[buffer(0)]],
+		uint2 gid [[thread_position_in_grid]]) {
+	if (gid.x >= destinationTexture.get_width() || gid.y >= destinationTexture.get_height()) {
+		return;
+	}
+
+	destinationTexture.write(sourceTexture.read(gid, level), gid);
+}
