@@ -10,6 +10,7 @@
 #include "PHASEOccluder3D.h"
 #include "PHASEAudioStreamPlayer3D.h"
 #include "PHASEManager.h"
+#import "PHASEWrapper.h"
 
 #include <gdextension_interface.h>
 #include <godot_cpp/core/defs.hpp>
@@ -35,6 +36,8 @@ void uninitialize_example_module(godot::ModuleInitializationLevel p_level) {
     if (p_level != godot::MODULE_INITIALIZATION_LEVEL_SCENE) {
         return;
     }
+
+    [PHASEEngineWrapper releaseSharedInstance];
 }
 
 extern "C" {

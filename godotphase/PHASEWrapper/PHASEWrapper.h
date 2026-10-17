@@ -129,6 +129,14 @@ enum CalibrationMode
 */
 + (id)sharedInstance;
 
+/*! @method releaseSharedInstance
+    @abstract Stops the shared instance's engine, removes its listener and notification observers, and drops it,
+              so the next sharedInstance access creates a fresh engine. Called when the extension is
+              uninitialized, so a host that initializes the extension again in the same process, such as an
+              engine instance that reuses the loaded library, does not inherit the previous run's state.
+*/
++ (void)releaseSharedInstance;
+
 #if TARGET_OS_VISION
 /*! @method setUseClientRenderingMode
     @abstract Configure whether to initialize the PHASEEngine with PHASERenderingModeClient on visionOS.

@@ -46,6 +46,9 @@ NS_HEADER_AUDIT_BEGIN(nullability)
     dispatch_queue_t mAudioSessionQueue;
 
     std::atomic<int64_t> mResumeGeneration;
+
+    id<NSObject> mResignActiveObserver;
+    id<NSObject> mBecomeActiveObserver;
 #endif //!TARGET_OS_OSX
 }
 
@@ -53,12 +56,55 @@ NS_HEADER_AUDIT_BEGIN(nullability)
 
 @implementation PHASEEngineWrapper : NSObject
 
+static PHASEEngineWrapper* sSharedWrapper = nil;
+static std::mutex sSharedWrapperMutex;
+
 + (id)sharedInstance
 {
-    static PHASEEngineWrapper* wrapper = nil;
-    static std::once_flag onceFlag;
-    std::call_once(onceFlag, [&self]() { wrapper = [[self alloc] init]; });
-    return wrapper;
+    std::lock_guard<std::mutex> lock(sSharedWrapperMutex);
+    if (sSharedWrapper == nil)
+    {
+        sSharedWrapper = [[self alloc] init];
+    }
+    return sSharedWrapper;
+}
+
++ (void)releaseSharedInstance
+{
+    PHASEEngineWrapper* wrapper = nil;
+    {
+        std::lock_guard<std::mutex> lock(sSharedWrapperMutex);
+        wrapper = sSharedWrapper;
+        sSharedWrapper = nil;
+    }
+    [wrapper shutdown];
+}
+
+- (void)shutdown
+{
+#if !TARGET_OS_OSX
+    // Abandon any pending session reactivation, then stop observing the app and the session.
+    ++mResumeGeneration;
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:AVAudioSessionInterruptionNotification
+                                                  object:nil];
+    if (mResignActiveObserver != nil)
+    {
+        [[NSNotificationCenter defaultCenter] removeObserver:mResignActiveObserver];
+        mResignActiveObserver = nil;
+    }
+    if (mBecomeActiveObserver != nil)
+    {
+        [[NSNotificationCenter defaultCenter] removeObserver:mBecomeActiveObserver];
+        mBecomeActiveObserver = nil;
+    }
+#endif //!TARGET_OS_OSX
+
+    if (mListener != nil)
+    {
+        [self destroyListener];
+    }
+    [mEngine stop];
 }
 
 #if TARGET_OS_VISION
@@ -241,13 +287,13 @@ static void RunOnMainThread(dispatch_block_t block)
                                                object:sessionInstance];
     
     // add handler when application goes to the background
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *notification)
+    mResignActiveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:nil usingBlock:^(NSNotification *notification)
      {
         [self suspendRendering];
     }];
          
     // add handler when application returns from the background
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *notification)
+    mBecomeActiveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *notification)
      {
         [self resumeRenderingAfter:@"UIApplicationDidBecomeActiveNotification" delay:0.0];
     }];
